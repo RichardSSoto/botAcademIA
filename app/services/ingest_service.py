@@ -26,6 +26,10 @@ from app.services import vector_store
 logger = get_logger(__name__)
 
 
+# ── FAQ collection name (shared across all materias) ─────────────────────────
+FAQ_COLLECTION_ID = "utel_faq"
+
+
 # ── Text chunking ─────────────────────────────────────────────────────────────
 
 def _chunk_text(
@@ -50,19 +54,90 @@ def _chunk_id(materia_id: str, source: str, idx: int) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+def _split_qa_sections(text: str) -> tuple[str, str]:
+    """
+    Split contenido.txt into (academic_text, faq_text).
+    The FAQ section begins at the first line starting with 'Q:'.
+    Returns (academic, faq) — faq may be empty if no Q: lines found.
+    """
+    lines = text.splitlines()
+    q_start = next((i for i, line in enumerate(lines) if line.startswith("Q:")), len(lines))
+    academic = "\n".join(lines[:q_start])
+    faq = "\n".join(lines[q_start:])
+    return academic, faq
+
+
+def _extract_qa_chunks(faq_text: str) -> list[tuple[str, dict]]:
+    """
+    Split FAQ text into individual Q&A pair chunks.
+    Each complete 'Q: ... A: ...' block = 1 chunk.
+
+    This is the core improvement over fixed-size chunking:
+    - Fixed-size (1000 chars) would split a 5-step answer across 2 chunks,
+      so the LLM receives only Paso 1-2 and invents the rest.
+    - Q&A-aware: the complete answer (all 5 steps) fits in 1 chunk.
+    - Each chunk is tagged tipo='faq' for source tracing.
+    """
+    lines = faq_text.splitlines()
+    results = []
+    current: list[str] = []
+
+    for line in lines:
+        if line.startswith("Q:") and current:
+            chunk = "\n".join(current).strip()
+            if chunk:
+                results.append((chunk, {"source": "contenido.txt", "tipo": "faq"}))
+            current = [line]
+        else:
+            current.append(line)
+
+    # flush last block
+    if current:
+        chunk = "\n".join(current).strip()
+        if chunk:
+            results.append((chunk, {"source": "contenido.txt", "tipo": "faq"}))
+
+    # Build final list:
+    #   document (embedded by ChromaDB) = Q: line only  → precise semantic match to student queries
+    #   metadata["full_qa"]             = full Q+A text  → returned to FlashRank + LLM
+    #
+    # Why? All FAQ questions share UTEL phrasing ("¿cómo puedo X?"). If we embed
+    # the full Q+A (question + 5-step answer), the embedding becomes "diluted" and
+    # ChromaDB retrieves topically similar but wrong FAQ items. Embedding only the
+    # Q: line keeps retrieval sharp; storing full_qa preserves the complete answer.
+    final = []
+    for i, (full_qa, meta) in enumerate(results):
+        q_lines = [l for l in full_qa.splitlines() if l.startswith("Q:")]
+        q_text = " ".join(q_lines) if q_lines else full_qa[:300]
+        final.append((q_text, {**meta, "chunk_index": i, "full_qa": full_qa}))
+    return final
+
+
 # ── Extractors ────────────────────────────────────────────────────────────────
 
 def _extract_from_txt(path: Path) -> list[tuple[str, dict]]:
-    """Read .txt file and return list of (chunk_text, metadata)."""
+    """
+    Read .txt file and return ONLY the academic section as fixed-size chunks.
+    The Q&A FAQ section is intentionally excluded here — it is ingested once
+    into the shared 'utel_faq' collection via ingest_faq().
+    Each chunk is tagged tipo='academico'.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except Exception as exc:
         logger.warning("Could not read %s: %s", path, exc)
         return []
 
+    academic_text, faq_text = _split_qa_sections(text)
+    logger.debug(
+        "%s | academic=%d chars  faq=%d chars  (%d Q&A pairs)",
+        path.name, len(academic_text), len(faq_text),
+        len([l for l in faq_text.splitlines() if l.startswith("Q:")]),
+    )
+
     results = []
-    for i, chunk in enumerate(_chunk_text(text)):
-        meta = {"source": "contenido.txt", "chunk_index": i}
+    for i, chunk in enumerate(_chunk_text(academic_text)):
+        meta = {"source": "contenido.txt", "tipo": "academico", "chunk_index": i}
         results.append((chunk, meta))
     return results
 
@@ -100,9 +175,75 @@ def _extract_from_json(path: Path, source_label: str) -> list[tuple[str, dict]]:
 
     results = []
     for i, chunk in enumerate(_chunk_text(full_text)):
-        meta = {"source": source_label, "chunk_index": i}
+        meta = {"source": source_label, "tipo": "academico", "chunk_index": i}
         results.append((chunk, meta))
     return results
+
+
+# ── FAQ ingest (shared collection, called once) ───────────────────────────────
+
+async def ingest_faq(force_reingest: bool = False) -> dict:
+    """
+    Ingest the shared UTEL Q&A FAQ into a single 'utel_faq' ChromaDB collection.
+
+    The FAQ section is identical across ALL materias (confirmed by MD5 comparison).
+    Storing it once instead of 5× reduces duplication and prevents the reranker
+    from returning the same chunk 5 times with near-identical distances.
+
+    Each Q&A pair becomes one atomic chunk — no step-by-step answers split mid-way.
+    """
+    logger.info("Ingesting shared FAQ collection (force=%s)", force_reingest)
+
+    if not force_reingest and await vector_store.collection_exists(FAQ_COLLECTION_ID):
+        count = await vector_store.get_collection_count(FAQ_COLLECTION_ID)
+        msg = f"Already indexed ({count} Q&A chunks). Use force_reingest=True to overwrite."
+        logger.info(msg)
+        return {"materia_id": FAQ_COLLECTION_ID, "status": "already_indexed",
+                "num_chunks": count, "message": msg}
+
+    if force_reingest:
+        await vector_store.delete_collection(FAQ_COLLECTION_ID)
+
+    # Use any materia's contenido.txt (FAQ sections are identical)
+    base_dir = Path(settings.MATERIAS_DATA_DIR)
+    sample_dir = next((d for d in sorted(base_dir.iterdir()) if d.is_dir()), None)
+    if not sample_dir:
+        msg = "No materia directories found in MATERIAS_DATA_DIR."
+        logger.error(msg)
+        return {"materia_id": FAQ_COLLECTION_ID, "status": "error", "num_chunks": 0, "message": msg}
+
+    txt_path = sample_dir / "contenido.txt"
+    if not txt_path.exists():
+        msg = f"contenido.txt not found in {sample_dir.name}"
+        logger.error(msg)
+        return {"materia_id": FAQ_COLLECTION_ID, "status": "error", "num_chunks": 0, "message": msg}
+
+    text = txt_path.read_text(encoding="utf-8")
+    _, faq_text = _split_qa_sections(text)
+    faq_items = _extract_qa_chunks(faq_text)
+
+    if not faq_items:
+        msg = "No Q&A pairs found in FAQ section."
+        logger.error(msg)
+        return {"materia_id": FAQ_COLLECTION_ID, "status": "error", "num_chunks": 0, "message": msg}
+
+    all_docs = [chunk for chunk, _ in faq_items]
+    all_metas = [{**meta, "materia_id": FAQ_COLLECTION_ID} for _, meta in faq_items]
+    all_ids = [_chunk_id(FAQ_COLLECTION_ID, "faq", i) for i in range(len(faq_items))]
+
+    BATCH_SIZE = 500
+    total = 0
+    for start in range(0, len(all_docs), BATCH_SIZE):
+        total = await vector_store.add_documents(
+            materia_id=FAQ_COLLECTION_ID,
+            documents=all_docs[start:start + BATCH_SIZE],
+            metadatas=all_metas[start:start + BATCH_SIZE],
+            ids=all_ids[start:start + BATCH_SIZE],
+        )
+
+    msg = f"Ingested {total} Q&A pair chunks into '{FAQ_COLLECTION_ID}' (from {sample_dir.name})."
+    logger.info(msg)
+    return {"materia_id": FAQ_COLLECTION_ID, "status": "indexed", "num_chunks": total, "message": msg}
 
 
 # ── Main ingest function ──────────────────────────────────────────────────────

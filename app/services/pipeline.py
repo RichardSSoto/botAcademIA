@@ -45,10 +45,10 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
 
     async def _timed_rag():
         t = time.perf_counter()
-        result = await vector_store.semantic_search(
+        result = await vector_store.semantic_search_combined(
             materia_id=request.materia_id,
             query=request.message,      # raw query — runs in parallel with preprocess
-            n_results=settings.RAG_FETCH_K,   # fetch more candidates for reranking
+            n_results=settings.RAG_FETCH_K,   # per-collection; total = 2×RAG_FETCH_K
         )
         return result, round((time.perf_counter() - t) * 1000)
 
@@ -92,7 +92,7 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
     # ── Reranking: reorder RAG_FETCH_K candidates → top RAG_TOP_K ────────────────────
     if settings.USE_RERANKER and raw_chunks:
         reranked_chunks, rerank_ms = await reranker.rerank(
-            query=preprocess.clean_query,   # use cleaned query for better scoring
+            query=request.message,          # original query — expanded query adds materia name which biases cross-encoder against FAQ chunks
             chunks=raw_chunks,
             top_k=settings.RAG_TOP_K,
         )

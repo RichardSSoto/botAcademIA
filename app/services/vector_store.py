@@ -2,13 +2,20 @@
 ChromaDB vector store service.
 Manages collections per materia and performs semantic search.
 Each materia_id maps to its own ChromaDB collection for isolation.
+
+Collections:
+  materia_{id}  — academic content for a specific course
+  materia_utel_faq — shared Q&A FAQ (identical across all materias, stored once)
 """
 from __future__ import annotations
 
+import asyncio
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from app.core.config import settings
 from app.core.logging import get_logger
+
+FAQ_COLLECTION_ID = "utel_faq"
 
 logger = get_logger(__name__)
 
@@ -117,8 +124,11 @@ async def semantic_search(
     dists = results.get("distances", [[]])[0]
 
     for doc, meta, dist in zip(docs, metas, dists):
+        # FAQ chunks: document = Q: text (for embedding precision)
+        # but full_qa metadata holds the complete Q+A for the LLM.
+        content = meta.get("full_qa") or doc
         chunks.append({
-            "content": doc,
+            "content": content,
             "source": meta.get("source", "unknown"),
             "materia_id": materia_id,
             "distance": round(dist, 4),
@@ -136,3 +146,56 @@ async def get_collection_count(materia_id: str) -> int:
         return await col.count()
     except Exception:
         return 0
+
+
+async def semantic_search_combined(
+    materia_id: str,
+    query: str,
+    n_results: int | None = None,
+) -> list[dict]:
+    """
+    Query BOTH the materia collection (academic content) AND the shared FAQ
+    collection in parallel, then merge all candidates.
+
+    Why combined?
+    - Academic collection: course theory, unit content, exam structure.
+    - FAQ collection: operational Q&As with complete step-by-step answers.
+    - FlashRank reranker picks the best top_k from the merged pool.
+
+    Each collection is queried with n_results candidates.
+    Total returned: up to 2 * n_results (reranker reduces to RAG_TOP_K).
+    """
+    n = n_results or settings.RAG_FETCH_K
+
+    materia_task = semantic_search(materia_id, query, n_results=n)
+    faq_task = semantic_search(FAQ_COLLECTION_ID, query, n_results=n)
+
+    materia_chunks, faq_chunks = await asyncio.gather(
+        materia_task, faq_task, return_exceptions=True
+    )
+
+    all_chunks: list[dict] = []
+
+    if isinstance(materia_chunks, list):
+        all_chunks.extend(materia_chunks)
+
+    if isinstance(faq_chunks, list) and faq_chunks:
+        # Keep materia_id consistent so pipeline logging shows correct materia
+        for c in faq_chunks:
+            c["materia_id"] = materia_id
+            c["source_collection"] = FAQ_COLLECTION_ID
+        all_chunks.extend(faq_chunks)
+    elif isinstance(faq_chunks, Exception):
+        logger.warning("FAQ collection search failed (not yet ingested?): %s", faq_chunks)
+
+    # Sort by cosine distance (ascending — lower = more similar) before reranking
+    all_chunks.sort(key=lambda x: x["distance"])
+
+    logger.debug(
+        "Combined search '%s': %d academic + %d faq = %d total candidates",
+        materia_id,
+        len(materia_chunks) if isinstance(materia_chunks, list) else 0,
+        len(faq_chunks) if isinstance(faq_chunks, list) else 0,
+        len(all_chunks),
+    )
+    return all_chunks
