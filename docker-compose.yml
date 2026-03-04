@@ -1,0 +1,246 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  BotAcademia Engine – docker-compose.yml  (POC / Development)
+#  Services: FastAPI + ChromaDB + PostgreSQL
+#  Kafka & Redis are included but under 'production' profile – disabled by default
+#
+#  Quick start:
+#    cp .env.example .env   # then add your GEMINI_API_KEY
+#    docker compose up -d
+#
+#  With production services:
+#    docker compose --profile production up -d
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── Named volumes (persistent data) ──────────────────────────────────────────
+volumes:
+  postgres_data:
+  chroma_data:
+  redis_data:
+  kafka_data:
+  zookeeper_data:
+
+# ── Shared network ────────────────────────────────────────────────────────────
+networks:
+  botacademia_net:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  # ── FastAPI Application ───────────────────────────────────────────────────
+  botacademia_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: botacademia_api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      # Override host names to use Docker service names
+      POSTGRES_HOST: postgres
+      CHROMA_HOST: chromadb
+      REDIS_HOST: redis
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # Give the system user a writable home dir so ONNX embedding cache works
+      HOME: /tmp
+    volumes:
+      # Mount source code for hot-reload in development
+      - ./app:/app/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    networks:
+      - botacademia_net
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8080
+      --reload
+      --reload-dir /app/app
+    labels:
+      - "traefik.enable=false"   # disable if not using Traefik
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        tag: "{{.Name}}"
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: botacademia_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-botacademia}
+      POSTGRES_USER: ${POSTGRES_USER:-botacademia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-botacademia_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - botacademia_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-botacademia} -d ${POSTGRES_DB:-botacademia}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        tag: "{{.Name}}"
+
+  # ── ChromaDB (Vector Store) ───────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    container_name: botacademia_chromadb
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      - chroma_data:/data
+    ports:
+      - "${CHROMA_PORT:-8001}:8000"
+    networks:
+      - botacademia_net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8000 2>/dev/null && echo ok"]
+      interval: 15s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        tag: "{{.Name}}"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # PRODUCTION PROFILE – only started with: docker compose --profile production up
+  # ════════════════════════════════════════════════════════════════════════════
+
+  # ── Redis (Session Cache) ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: botacademia_redis
+    restart: unless-stopped
+    profiles: ["production"]
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - botacademia_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        tag: "{{.Name}}"
+
+  # ── Zookeeper (required by Kafka) ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: botacademia_zookeeper
+    restart: unless-stopped
+    profiles: ["production"]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - botacademia_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        tag: "{{.Name}}"
+
+  # ── Kafka (Message Broker) ────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: botacademia_kafka
+    restart: unless-stopped
+    profiles: ["production"]
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Durability settings for production
+      KAFKA_LOG_RETENTION_HOURS: 168          # 7 days
+      KAFKA_LOG_RETENTION_BYTES: 1073741824   # 1 GB
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 3
+      # Topic auto-creation
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "9094:9094"   # external access from host
+    networks:
+      - botacademia_net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+        tag: "{{.Name}}"
+
+  # ── Kafka UI (optional dev tool) ─────────────────────────────────────────
+  kafka_ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: botacademia_kafka_ui
+    restart: unless-stopped
+    profiles: ["production"]
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: botacademia
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8090:8080"
+    networks:
+      - botacademia_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+        tag: "{{.Name}}"
