@@ -29,6 +29,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 from app.models.db_models import QueryLog
 from app.services import llm_service, vector_store
+from app.services.redis_cache import get_session_context, update_session_context
 from app.workers.kafka_producer import publish_processed_query
 
 logger = get_logger(__name__)
@@ -93,20 +94,29 @@ async def rag_consumer() -> None:
             interaction_id = payload.get("interaction_id", "?")
             try:
                 # Vector search
-                chunks = await vector_store.semantic_search(
+                chunks = await vector_store.semantic_search_combined(
                     materia_id=payload["materia_id"],
-                    query=payload.get("clean_query", payload["message"]),
+                    query=payload["message"],
                 )
 
+                # Load session history from Redis for multi-turn context
+                history = await get_session_context(interaction_id)
+
                 # LLM generation
-                response_text = await llm_service.generate_rag_response(
+                response_text, _, _ = await llm_service.generate_rag_response(
                     original_message=payload["message"],
-                    clean_query=payload.get("clean_query", payload["message"]),
                     sentiment=payload.get("sentiment", "neutral"),
                     intent=payload.get("intent", "academico"),
                     context_chunks=chunks,
                     materia_id=payload["materia_id"],
                     interaction_id=interaction_id,
+                    conversation_history=history,
+                )
+
+                # Update Redis session cache
+                await update_session_context(
+                    interaction_id, payload["message"], response_text,
+                    max_turns=settings.SESSION_MAX_TURNS,
                 )
 
                 # Persist to PostgreSQL
@@ -117,7 +127,6 @@ async def rag_consumer() -> None:
                         log_entry.response = response_text
                         log_entry.intent = payload.get("intent")
                         log_entry.sentiment = payload.get("sentiment")
-                        log_entry.clean_query = payload.get("clean_query")
                         log_entry.retrieved_chunks = json.dumps(chunks, ensure_ascii=False)
                         log_entry.num_chunks = len(chunks)
                         log_entry.status = "completed"

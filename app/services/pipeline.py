@@ -5,8 +5,7 @@ async function that the FastAPI route calls directly.
 
 Flow: raw_message → [preprocess (LLM) ‖ semantic_search (ChromaDB)] → generate (LLM)
 Note: preprocess and RAG run in PARALLEL via asyncio.gather to reduce latency.
-      RAG uses the raw message during parallel phase; clean_query improves intent
-      classification and sentiment detection, both logged for debugging.
+      preprocess provides intent/sentiment; RAG uses the raw message directly.
 """
 import asyncio
 import time
@@ -14,6 +13,7 @@ import json
 from app.core.logging import get_logger
 from app.models.schemas import QueryRequest, QueryResponse, PreprocessResult, RAGResult, RetrievedChunk
 from app.services import llm_service, vector_store, reranker
+from app.services.redis_cache import get_session_context, update_session_context, invalidate_session
 from app.core.config import settings
 
 logger = get_logger(__name__)
@@ -29,10 +29,15 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
         "Pipeline start | interaction=%s materia=%s",
         request.interaction_id, request.materia_id,
     )
-
+    # ── Load conversation history from Redis (empty list when Redis off or new session) ────────
+    history = await get_session_context(request.interaction_id)
+    if history:
+        logger.debug(
+            "Session history loaded | interaction=%s turns=%d",
+            request.interaction_id, len(history) // 2,
+        )
     # ── Stages 1 + 2: PARALLEL ─ preprocess + RAG search ────────────────────
-    # Both run concurrently. RAG uses the raw message (clean_query is logged
-    # for comparison but search already done before preprocess finishes).
+    # Both run concurrently using the raw message.
     t0 = time.perf_counter()
 
     async def _timed_preprocess():
@@ -62,9 +67,10 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
     preprocess = PreprocessResult(
         intent=preprocess_raw.get("intent", "academico"),
         sentiment=preprocess_raw.get("sentiment", "neutral"),
-        clean_query=preprocess_raw.get("clean_query", request.message),
         confidence=preprocess_raw.get("confidence", 1.0),
     )
+    preprocess_tokens_in  = preprocess_raw.get("_tokens_in",  0) or 0
+    preprocess_tokens_out = preprocess_raw.get("_tokens_out", 0) or 0
 
     logger.info(
         "Pre-process done | intent=%s sentiment=%s confidence=%.2f %.0fms",
@@ -73,10 +79,6 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
     logger.debug(
         "QUERY ORIGINAL   | interaction=%s | %s",
         request.interaction_id, request.message,
-    )
-    logger.debug(
-        "QUERY MEJORADA   | interaction=%s | %s",
-        request.interaction_id, preprocess.clean_query,
     )
 
     chunks = [RetrievedChunk(**c) for c in raw_chunks]
@@ -132,8 +134,11 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
             response="¡Hola! Estoy aquí para ayudarte con dudas académicas sobre tu materia. ¿En qué puedo ayudarte?",
             intent=preprocess.intent,
             sentiment=preprocess.sentiment,
-            processing_time_ms=(time.perf_counter() - t_start) * 1000,
-        )
+            processing_time_ms=round((time.perf_counter() - t_start) * 1000),
+        ), {"_preprocessing_ms": preprocessing_ms, "_rag_ms": rag_ms,
+            "_rerank_ms": 0, "_parallel_wall_ms": parallel_wall_ms,
+            "_llm_ms": 0, "_chunks": [],
+            "_session_status": "active"}
 
     if preprocess.intent == "saludo":
         return QueryResponse(
@@ -142,21 +147,58 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
             response="¡Hola! Estoy aquí para ayudarte con tu materia. ¿Qué duda tienes hoy?",
             intent=preprocess.intent,
             sentiment=preprocess.sentiment,
-            processing_time_ms=(time.perf_counter() - t_start) * 1000,
+            processing_time_ms=round((time.perf_counter() - t_start) * 1000),
+        ), {"_preprocessing_ms": preprocessing_ms, "_rag_ms": rag_ms,
+            "_rerank_ms": 0, "_parallel_wall_ms": parallel_wall_ms,
+            "_llm_ms": 0, "_chunks": [],
+            "_session_status": "active"}
+
+    # ── Farewell: natural conversation end detected by pre-processor ────────────────────
+    if preprocess.intent == "despedida":
+        farewell = (
+            "¡Fue un placer acompañarte en tu aprendizaje! 🎓 "
+            "Si necesitas ayuda en el futuro, aquí estaré. ¡Mucho éxito en tus estudios! 💪"
         )
+        await update_session_context(
+            request.interaction_id, request.message, farewell,
+            max_turns=settings.SESSION_MAX_TURNS,
+        )
+        await invalidate_session(request.interaction_id)
+        logger.info(
+            "Farewell detected | interaction=%s session=closed",
+            request.interaction_id,
+        )
+        return QueryResponse(
+            interaction_id=request.interaction_id,
+            materia_id=request.materia_id,
+            response=farewell,
+            intent=preprocess.intent,
+            sentiment=preprocess.sentiment,
+            processing_time_ms=round((time.perf_counter() - t_start) * 1000),
+            session_status="closed",
+        ), {"_preprocessing_ms": preprocessing_ms, "_rag_ms": rag_ms,
+            "_rerank_ms": 0, "_parallel_wall_ms": parallel_wall_ms,
+            "_llm_ms": 0, "_chunks": [],
+            "_session_status": "closed"}
 
     # ── Stage 3: LLM Response Generation ─────────────────────────────────────
     t0 = time.perf_counter()
-    response_text = await llm_service.generate_rag_response(
+    response_text, tokens_in, tokens_out = await llm_service.generate_rag_response(
         original_message=request.message,
-        clean_query=preprocess.clean_query,
         sentiment=preprocess.sentiment,
         intent=preprocess.intent,
         context_chunks=final_chunks,        # reranked top-K (or raw top-K if reranker off)
         materia_id=request.materia_id,
         interaction_id=request.interaction_id,
+        conversation_history=history,       # Redis session context for multi-turn coherence
     )
     llm_ms = round((time.perf_counter() - t0) * 1000)
+
+    # ── Persist this turn to Redis session cache ────────────────────────────────────────
+    await update_session_context(
+        request.interaction_id, request.message, response_text,
+        max_turns=settings.SESSION_MAX_TURNS,
+    )
 
     total_ms = round((time.perf_counter() - t_start) * 1000)
     logger.debug(
@@ -175,6 +217,10 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
         intent=preprocess.intent,
         sentiment=preprocess.sentiment,
         processing_time_ms=total_ms,
+        session_status="active",
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        tokens_total=tokens_in + tokens_out,
     ), {
         "_preprocessing_ms": preprocessing_ms,
         "_rag_ms": rag_ms,
@@ -182,5 +228,9 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
         "_parallel_wall_ms": parallel_wall_ms,
         "_llm_ms": llm_ms,
         "_chunks": [c.model_dump() for c in chunks],
-        "_clean_query": preprocess.clean_query,
+        "_session_status": "active",
+        "_tokens_in": tokens_in,
+        "_tokens_out": tokens_out,
+        "_preprocess_tokens_in":  preprocess_tokens_in,
+        "_preprocess_tokens_out": preprocess_tokens_out,
     }

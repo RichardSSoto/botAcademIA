@@ -31,12 +31,22 @@ async def lifespan(app: FastAPI):
         await start_consumers()
         logger.info("Kafka consumers started")
 
+    # Session cleanup worker (always-on: closes idle Redis sessions + DB records)
+    from app.workers.session_cleanup import start_cleanup_worker, stop_cleanup_worker
+    await start_cleanup_worker()
+    logger.info(
+        "Session cleanup worker started (idle_timeout=%dmin)",
+        settings.SESSION_IDLE_TIMEOUT_MINUTES,
+    )
+
     yield
 
     logger.info("BotAcademia Engine shutting down")
     if settings.USE_KAFKA:
         from app.workers.kafka_consumer import stop_consumers
         await stop_consumers()
+
+    await stop_cleanup_worker()
 
 
 # ── App factory ───────────────────────────────────────────────────────────────

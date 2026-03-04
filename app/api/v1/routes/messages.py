@@ -1,22 +1,80 @@
 """
 /api/v1/query  - Main endpoint consumed by BOT LUA
 /api/v1/health - Service liveness check
+
+Session lifecycle (DB status field):
+  created  → session row inserted, first message in pipeline (no response yet)
+  active   → first successful response delivered; stays active on every following turn
+  closed   → natural farewell detected by LLM OR external status='closed' signal
+  timeout  → session closed by idle-cleanup worker due to inactivity
+
+Re-open: if a message arrives for a session in 'closed' or 'timeout' state,
+the session is automatically reopened (status → created) with a fresh Redis history.
 """
 import json
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.database import get_db
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.schemas import QueryRequest, QueryResponse, ErrorResponse, HealthResponse
-from app.models.db_models import QueryLog
+from app.models.db_models import QueryLog, ConversationSession
 from app.services.pipeline import run_pipeline
+from app.services.redis_cache import invalidate_session
 from app.services import vector_store
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+_CLOSED_RESPONSE = (
+    "Sesión finalizada. ¡Hasta pronto y mucho éxito en tus estudios! 👋🎓"
+)
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────────────
+
+async def _get_or_create_session(
+    db: AsyncSession, interaction_id: str, materia_id: str
+) -> tuple[ConversationSession, bool]:
+    """
+    Fetch existing session or create a new one.
+    Returns (session, is_reopened).
+    Reopens automatically if status is 'closed' or 'timeout'.
+    """
+    stmt = select(ConversationSession).where(
+        ConversationSession.interaction_id == interaction_id
+    )
+    result = await db.execute(stmt)
+    session = result.scalar_one_or_none()
+
+    if not session:
+        session = ConversationSession(
+            interaction_id=interaction_id,
+            materia_id=materia_id,
+            status="created",
+        )
+        db.add(session)
+        await db.flush()
+        logger.debug("New session created | interaction=%s", interaction_id)
+        return session, False
+
+    # Re-open a previously closed or timed-out session with a fresh history
+    if session.status in ("closed", "timeout"):
+        prev_status = session.status
+        session.status = "created"
+        session.closed_at = None
+        session.last_activity_at = datetime.now(timezone.utc)
+        logger.info(
+            "Session reopened | interaction=%s prev_status=%s turns_so_far=%d",
+            interaction_id, prev_status, session.turn_count,
+        )
+        return session, True
+
+    return session, False
 
 
 # ── POST /query ───────────────────────────────────────────────────────────────
@@ -30,9 +88,9 @@ router = APIRouter()
     },
     summary="Process a student query via RAG pipeline",
     description=(
-        "Receives a message from BOT LUA with an interaction_id and materia_id. "
-        "Runs the full pipeline: pre-process → vector search → LLM response. "
-        "Logs the complete interaction to PostgreSQL."
+        "Receives a message from BOT LUA. "
+        "Use status='active' for normal queries and status='closed' to signal session end. "
+        "Logs the complete interaction to PostgreSQL and maintains Redis session context."
     ),
 )
 async def process_query(
@@ -40,29 +98,89 @@ async def process_query(
     db: AsyncSession = Depends(get_db),
 ) -> QueryResponse:
 
-    # ── Create pending log entry ──────────────────────────────────────────────
+    # ──
+    # PATH A: External system closes the session (no pipeline involved)
+    # ──
+    if request.status == "closed":
+        # 1. Clear Redis session cache immediately
+        await invalidate_session(request.interaction_id)
+
+        # 2. Update or create the ConversationSession record
+        session, _ = await _get_or_create_session(db, request.interaction_id, request.materia_id)
+        if session.status in ("created", "active"):
+            session.status = "closed"
+            session.closed_at = datetime.now(timezone.utc)
+
+        # 3. Minimal log entry (no pipeline was run)
+        log_entry = QueryLog(
+            interaction_id=request.interaction_id,
+            materia_id=request.materia_id,
+            original_message="[session closed by external system]",
+            intent="despedida",
+            sentiment="neutral",
+            response=_CLOSED_RESPONSE,
+            status="completed",
+            turn_number=session.turn_count,
+            session_status="closed",
+            total_ms=0.0,
+        )
+        db.add(log_entry)
+        await db.commit()
+
+        logger.info(
+            "Session closed by external system | interaction=%s turns=%d",
+            request.interaction_id, session.turn_count,
+        )
+        return QueryResponse(
+            interaction_id=request.interaction_id,
+            materia_id=request.materia_id,
+            response=_CLOSED_RESPONSE,
+            intent="despedida",
+            sentiment="neutral",
+            processing_time_ms=0.0,
+            status="completed",
+            session_status="closed",
+        )
+
+    # ──
+    # PATH B: Normal active query → full pipeline
+    # ──
+
+    # Ensure ConversationSession exists (create/reopen)
+    session, is_reopened = await _get_or_create_session(db, request.interaction_id, request.materia_id)
+    if is_reopened:
+        logger.info(
+            "Session reopened with fresh history | interaction=%s",
+            request.interaction_id,
+        )
+
+    # Create pending log entry for this turn
+    turn_num = session.turn_count + 1
     log_entry = QueryLog(
         interaction_id=request.interaction_id,
         materia_id=request.materia_id,
         original_message=request.message,
         status="processing",
+        turn_number=turn_num,
     )
     db.add(log_entry)
-    await db.flush()  # get the ID without committing
+    await db.flush()
 
     try:
         result_tuple = await run_pipeline(request)
 
-        # run_pipeline returns (QueryResponse, metadata_dict)
+        # run_pipeline always returns (QueryResponse, metadata_dict)
         if isinstance(result_tuple, tuple):
             response, meta = result_tuple
         else:
             response, meta = result_tuple, {}
 
-        # ── Update log entry ──────────────────────────────────────────────────
+        new_session_status = meta.get("_session_status", response.session_status)
+
+        # ── Update log entry with full pipeline results ──────────────────────────────────────
         log_entry.intent = response.intent
         log_entry.sentiment = response.sentiment
-        log_entry.clean_query = meta.get("_clean_query")
+
         log_entry.retrieved_chunks = json.dumps(meta.get("_chunks", []), ensure_ascii=False)
         log_entry.num_chunks = len(meta.get("_chunks", []))
         log_entry.response = response.response
@@ -71,13 +189,60 @@ async def process_query(
         log_entry.llm_ms = meta.get("_llm_ms")
         log_entry.total_ms = response.processing_time_ms
         log_entry.status = "completed"
+        log_entry.session_status = new_session_status
 
+        # ── Token consumption ────────────────────────────────────────────────────────────────
+        t_in  = meta.get("_tokens_in",  0) or 0
+        t_out = meta.get("_tokens_out", 0) or 0
+        p_in  = meta.get("_preprocess_tokens_in",  0) or 0
+        p_out = meta.get("_preprocess_tokens_out", 0) or 0
+        log_entry.tokens_in              = t_in
+        log_entry.tokens_out             = t_out
+        log_entry.tokens_total           = t_in + t_out
+        log_entry.preprocess_tokens_in   = p_in
+        log_entry.preprocess_tokens_out  = p_out
+        log_entry.all_tokens_total       = t_in + t_out + p_in + p_out
+
+        # ── Update ConversationSession ────────────────────────────────────────────────────────────
+        session.turn_count      = turn_num
+        session.total_tokens_in  = (session.total_tokens_in  or 0) + t_in  + p_in
+        session.total_tokens_out = (session.total_tokens_out or 0) + t_out + p_out
+        session.total_tokens     = (session.total_tokens     or 0) + t_in + t_out + p_in + p_out
+
+        # ── Append user message to the running list ────────────────────────────────────
+        current_msgs = list(session.user_messages or [])
+        current_msgs.append({
+            "turn":    turn_num,
+            "message": request.message,
+            "intent":  response.intent,
+            "ts":      datetime.now(timezone.utc).isoformat(),
+        })
+        session.user_messages = current_msgs
+        flag_modified(session, "user_messages")  # tell SQLAlchemy the JSONB changed
+
+        # ── Bump last activity timestamp (used by idle-session cleanup job) ────────────
+        session.last_activity_at = datetime.now(timezone.utc)
+
+        # ── Advance session status through the state machine ─────────────────────────
+        if new_session_status == "closed":
+            session.status = "closed"
+            session.closed_at = datetime.now(timezone.utc)
+            logger.info(
+                "Session closed (farewell) | interaction=%s turns=%d",
+                request.interaction_id, turn_num,
+            )
+        elif session.status == "created":
+            # First successful response → promote to active
+            session.status = "active"
+
+        await db.commit()
         return response
 
     except Exception as exc:
         logger.exception("Pipeline error for interaction=%s: %s", request.interaction_id, exc)
         log_entry.status = "error"
         log_entry.error_message = str(exc)
+        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Pipeline error: {exc}",

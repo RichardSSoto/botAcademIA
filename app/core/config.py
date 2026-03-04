@@ -53,12 +53,15 @@ class Settings(BaseSettings):
     CHROMA_PORT: int = 8000
     CHROMA_PERSIST_DIR: str = "/app/data/chroma"
 
-    # ── Redis (production) ────────────────────────────
+    # ── Redis (session cache) ────────────────────────────────────────────────
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: str = ""
-    REDIS_TTL_SECONDS: int = 3600          # 1 hour session cache
-    USE_REDIS: bool = False                # Disabled in POC
+    REDIS_TTL_SECONDS: int = 3600          # 1 hour session TTL (reset on each turn)
+    SESSION_MAX_TURNS: int = 10            # max turns kept in Redis history
+    USE_REDIS: bool = True                 # enabled; redis service is always-on in docker-compose
+    SESSION_IDLE_TIMEOUT_MINUTES: int = 3  # close stale sessions after N minutes of inactivity
+    SESSION_CLEANUP_INTERVAL_SECONDS: int = 60  # how often the cleanup job runs
 
     @property
     def REDIS_URL(self) -> str:
@@ -73,7 +76,7 @@ class Settings(BaseSettings):
     KAFKA_TOPIC_RESPONSES: str = "botacademia.responses"
     KAFKA_GROUP_ID_PREPROCESSOR: str = "botacademia-preprocessor"
     KAFKA_GROUP_ID_RAG: str = "botacademia-rag-engine"
-    USE_KAFKA: bool = False                # Disabled in POC
+    USE_KAFKA: bool = False                # disabled by default; enable with production profile
 
     # ── LLM mock (set to True to skip Gemini API calls during dev/demo) ────
     USE_MOCK_LLM: bool = False

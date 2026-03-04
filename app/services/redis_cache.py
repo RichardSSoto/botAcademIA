@@ -70,9 +70,15 @@ async def invalidate_session(interaction_id: str) -> None:
     """Remove session cache for an interaction (e.g. conversation ended)."""
     r = await get_redis()
     if not r:
+        logger.info("Redis SKIP (disabled) | session:%s NOT deleted", interaction_id)
         return
     try:
-        await r.delete(f"session:{interaction_id}")
+        logger.info("Redis DEL → session:%s (cerrando caché de conversación)", interaction_id)
+        deleted = await r.delete(f"session:{interaction_id}")
+        if deleted:
+            logger.info("Redis DEL confirmed ✓ | session:%s eliminado correctamente | costo LLM detenido", interaction_id)
+        else:
+            logger.warning("Redis DEL | session:%s ya no existía en caché", interaction_id)
     except Exception as exc:
         logger.warning("Redis DEL error: %s", exc)
 
