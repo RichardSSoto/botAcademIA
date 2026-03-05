@@ -97,6 +97,8 @@ class QueryResponse(BaseModel):
     tokens_in:    int | None = Field(None, description="Prompt tokens sent to Gemini")
     tokens_out:   int | None = Field(None, description="Response tokens received from Gemini")
     tokens_total: int | None = Field(None, description="Total tokens for this turn (in + out)")
+    # True when the response was served from the semantic cache (zero LLM cost)
+    cache_hit: bool = False
 
 
 class ErrorResponse(BaseModel):

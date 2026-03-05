@@ -30,6 +30,8 @@ orjson==3.10.11           # fast JSON serialisation
 # ── Reranker ─────────────────────────────────────────────────────────────────
 flashrank==0.2.9          # ultra-lite reranker (~4MB ONNX model, no Torch needed)
 
+# ── Tunnel (local dev only) ───────────────────────────────────────────────────
+pyngrok>=7.0              # ngrok tunnel wrapper — only used when TUNNEL_ENABLED=truenumpy>=1.26               # cosine similarity for semantic cache (also pulled by chromadb)
 # ── Dev / Testing ─────────────────────────────────────────────────────────────
 pytest==8.3.3
 pytest-asyncio==0.24.0

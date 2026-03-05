@@ -109,9 +109,10 @@ services:
     restart: unless-stopped
     environment:
       IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma   # explicit path = matches Docker image default
       ANONYMIZED_TELEMETRY: "FALSE"
     volumes:
-      - chroma_data:/data
+      - chroma_data:/chroma/chroma        # was /data — wrong path, data was never persisted
     ports:
       - "${CHROMA_PORT:-8001}:8000"
     networks:

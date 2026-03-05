@@ -14,6 +14,7 @@ from app.core.logging import get_logger
 from app.models.schemas import QueryRequest, QueryResponse, PreprocessResult, RAGResult, RetrievedChunk
 from app.services import llm_service, vector_store, reranker
 from app.services.redis_cache import get_session_context, update_session_context, invalidate_session
+from app.services import semantic_cache
 from app.core.config import settings
 
 logger = get_logger(__name__)
@@ -36,6 +37,52 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
             "Session history loaded | interaction=%s turns=%d",
             request.interaction_id, len(history) // 2,
         )
+
+    # ── Semantic cache check (context-free first turns only) ─────────────────
+    # history being empty = first turn of session → question is self-contained → cacheable.
+    # Any turn with prior history is context-dependent ("quiero saber más", pronoun refs, etc.)
+    # and is NEVER served from cache; the guard is inside get_cached_response().
+    if settings.SEMANTIC_CACHE_ENABLED:
+        cached = await semantic_cache.get_cached_response(
+            message=request.message,
+            materia_id=request.materia_id,
+            history=history,
+        )
+        if cached:
+            # Write this turn to Redis history so turn 2 sees non-empty history
+            # and cannot accidentally get a context-dependent answer from cache.
+            await update_session_context(
+                request.interaction_id, request.message, cached["response"],
+                max_turns=settings.SESSION_MAX_TURNS,
+            )
+            logger.info(
+                "Cache HIT | interaction=%s materia=%s | similarity=%.4f | %.0fms",
+                request.interaction_id, request.materia_id,
+                cached["_cache_similarity"],
+                round((time.perf_counter() - t_start) * 1000),
+            )
+            return QueryResponse(
+                interaction_id=request.interaction_id,
+                materia_id=request.materia_id,
+                response=cached["response"],
+                intent=cached["intent"],
+                sentiment=cached["sentiment"],
+                processing_time_ms=round((time.perf_counter() - t_start) * 1000),
+                session_status="active",
+                tokens_in=0,
+                tokens_out=0,
+                tokens_total=0,
+                cache_hit=True,
+            ), {
+                "_preprocessing_ms": 0, "_rag_ms": 0,
+                "_rerank_ms": 0, "_parallel_wall_ms": 0,
+                "_llm_ms": 0, "_chunks": [],
+                "_session_status": "active",
+                "_tokens_in": 0, "_tokens_out": 0,
+                "_preprocess_tokens_in": 0, "_preprocess_tokens_out": 0,
+                "_cache_hit": True,
+            }
+
     # ── Stages 1 + 2: PARALLEL ─ preprocess + RAG search ────────────────────
     # Both run concurrently using the raw message.
     t0 = time.perf_counter()
@@ -82,10 +129,16 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
     )
 
     chunks = [RetrievedChunk(**c) for c in raw_chunks]
-    logger.info(
-        "RAG search done | materia=%s chunks=%d %.0fms",
-        request.materia_id, len(chunks), rag_ms,
-    )
+    if chunks:
+        logger.info(
+            "RAG search done | materia=%s chunks=%d %.0fms",
+            request.materia_id, len(chunks), rag_ms,
+        )
+    else:
+        logger.warning(
+            "RAG EMPTY | materia=%s chunks=0 %.0fms | ChromaDB devolvió 0 resultados — verificar colección",
+            request.materia_id, rag_ms,
+        )
     logger.info(
         "Parallel wall time | %.0fms (preprocess=%.0f rag=%.0f saved=~%.0fms vs serial)",
         parallel_wall_ms, preprocessing_ms, rag_ms, saved_ms,
@@ -181,6 +234,35 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
             "_llm_ms": 0, "_chunks": [],
             "_session_status": "closed"}
 
+    # ── Short-circuit: no chunks for academic query → refuse gracefully, save LLM tokens ────
+    if not final_chunks and preprocess.intent in ("academico", "queja"):
+        no_data_response = (
+            "⚠️ No encontré información sobre ese tema en el material de tu materia. "
+            "Te recomiendo consultarlo con tu profesor o revisar el material del curso."
+        )
+        logger.warning(
+            "RAG NO CHUNKS | interaction=%s intent=%s | LLM call skipped — 0 fragmentos para consulta académica",
+            request.interaction_id, preprocess.intent,
+        )
+        await update_session_context(
+            request.interaction_id, request.message, no_data_response,
+            max_turns=settings.SESSION_MAX_TURNS,
+        )
+        return QueryResponse(
+            interaction_id=request.interaction_id,
+            materia_id=request.materia_id,
+            response=no_data_response,
+            intent=preprocess.intent,
+            sentiment=preprocess.sentiment,
+            processing_time_ms=round((time.perf_counter() - t_start) * 1000),
+            session_status="active",
+        ), {"_preprocessing_ms": preprocessing_ms, "_rag_ms": rag_ms,
+            "_rerank_ms": rerank_ms, "_parallel_wall_ms": parallel_wall_ms,
+            "_llm_ms": 0, "_chunks": [],
+            "_preprocess_tokens_in": preprocess_tokens_in,
+            "_preprocess_tokens_out": preprocess_tokens_out,
+            "_session_status": "active"}
+
     # ── Stage 3: LLM Response Generation ─────────────────────────────────────
     t0 = time.perf_counter()
     response_text, tokens_in, tokens_out = await llm_service.generate_rag_response(
@@ -199,6 +281,20 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
         request.interaction_id, request.message, response_text,
         max_turns=settings.SESSION_MAX_TURNS,
     )
+
+    # ── Semantic cache: store self-contained responses for future paraphrase hits ─────────
+    # semantic_cache.cache_response() decides internally whether the question is
+    # context-dependent (skip) or self-contained (store). No need to guard here.
+    # create_task runs in background so it does NOT add latency to the HTTP response.
+    if settings.SEMANTIC_CACHE_ENABLED:
+        asyncio.create_task(semantic_cache.cache_response(
+            message=request.message,
+            materia_id=request.materia_id,
+            response=response_text,
+            intent=preprocess.intent,
+            sentiment=preprocess.sentiment,
+            history=history,
+        ))
 
     total_ms = round((time.perf_counter() - t_start) * 1000)
     logger.debug(
@@ -221,6 +317,7 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         tokens_total=tokens_in + tokens_out,
+        cache_hit=False,
     ), {
         "_preprocessing_ms": preprocessing_ms,
         "_rag_ms": rag_ms,
@@ -233,4 +330,5 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
         "_tokens_out": tokens_out,
         "_preprocess_tokens_in":  preprocess_tokens_in,
         "_preprocess_tokens_out": preprocess_tokens_out,
+        "_cache_hit": False,
     }

@@ -39,6 +39,43 @@ async def lifespan(app: FastAPI):
         settings.SESSION_IDLE_TIMEOUT_MINUTES,
     )
 
+    # ChromaDB ONNX warmup: force model load now so first real query is not slow
+    # Without this, the first RAG call after a restart takes ~70s loading the ONNX encoder.
+    try:
+        import asyncio
+        from app.services.vector_store import semantic_search_combined
+        logger.info("ChromaDB ONNX warmup starting...")
+        await asyncio.wait_for(
+            semantic_search_combined("test", "warmup", n_results=1),
+            timeout=120,
+        )
+        logger.info("ChromaDB ONNX warmup complete ✅")
+    except Exception as e:
+        logger.warning("ChromaDB warmup skipped: %s", e)
+
+    # ── ngrok tunnel (local dev only) ──────────────────────────────────────────
+    # Controlled by TUNNEL_ENABLED in .env. Never runs in production.
+    ngrok_tunnel = None
+    if settings.TUNNEL_ENABLED:
+        try:
+            from pyngrok import ngrok
+            if settings.NGROK_AUTHTOKEN:
+                ngrok.set_auth_token(settings.NGROK_AUTHTOKEN)
+            connect_kwargs = {"proto": "http"}
+            if settings.NGROK_DOMAIN:
+                connect_kwargs["domain"] = settings.NGROK_DOMAIN
+            ngrok_tunnel = ngrok.connect(settings.NGROK_PORT, **connect_kwargs)
+            public_url = ngrok_tunnel.public_url
+            logger.info("=" * 62)
+            logger.info("NGROK TUNNEL ACTIVE")
+            logger.info("  Public URL  : %s", public_url)
+            logger.info("  Query endpt : %s/api/v1/query", public_url)
+            logger.info("  Swagger UI  : %s/docs", public_url)
+            logger.info("  (desactiva con TUNNEL_ENABLED=false en .env)")
+            logger.info("=" * 62)
+        except Exception as e:
+            logger.warning("Ngrok tunnel failed to start: %s", e)
+
     yield
 
     logger.info("BotAcademia Engine shutting down")
@@ -47,6 +84,16 @@ async def lifespan(app: FastAPI):
         await stop_consumers()
 
     await stop_cleanup_worker()
+
+    # Close ngrok tunnel cleanly
+    if ngrok_tunnel:
+        try:
+            from pyngrok import ngrok
+            ngrok.disconnect(ngrok_tunnel.public_url)
+            ngrok.kill()
+            logger.info("Ngrok tunnel closed")
+        except Exception as e:
+            logger.warning("Ngrok shutdown error: %s", e)
 
 
 # ── App factory ───────────────────────────────────────────────────────────────

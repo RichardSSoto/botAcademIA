@@ -171,8 +171,8 @@ FORMATO (obligatorio):
 - Lista PLANA con guión (-) y *negrita* en el título de cada opción. Sin sub-bullets anidados.
 - Si el contexto tiene N opciones o pasos, inclúyelos TODOS sin omitir ninguno.
 - Máx. 2 líneas por punto. Doble salto entre secciones.
-- Cierra con: ¿Te puedo ayudar con algo más? 😊
 - Sin datos en contexto: ⚠️ No tengo ese dato, consúltalo con tu profesor.
+- PROHIBIDO terminar con frases de cierre como "¿Te puedo ayudar con algo más?", "Espero haberte ayudado", "¡Aquí estoy para apoyarte!" o similares. Termina directamente después del último punto de contenido.
 """
 
 

@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: str = ""
     REDIS_TTL_SECONDS: int = 3600          # 1 hour session TTL (reset on each turn)
-    SESSION_MAX_TURNS: int = 10            # max turns kept in Redis history
+    SESSION_MAX_TURNS: int = 3            # max turns kept in Redis history
     USE_REDIS: bool = True                 # enabled; redis service is always-on in docker-compose
     SESSION_IDLE_TIMEOUT_MINUTES: int = 3  # close stale sessions after N minutes of inactivity
     SESSION_CLEANUP_INTERVAL_SECONDS: int = 60  # how often the cleanup job runs
@@ -78,6 +78,21 @@ class Settings(BaseSettings):
     KAFKA_GROUP_ID_RAG: str = "botacademia-rag-engine"
     USE_KAFKA: bool = False                # disabled by default; enable with production profile
 
+    # ── Semantic response cache ──────────────────────
+    SEMANTIC_CACHE_ENABLED: bool = True           # check/store semantic cache (first turn only)
+    SEMANTIC_CACHE_THRESHOLD: float = 0.92        # cosine similarity threshold for a HIT
+    SEMANTIC_CACHE_TTL_SECONDS: int = 86400       # 24 h — how long cached answers live in Redis
+
+    # ── Tunnel (local dev only) ──────────────────────────────────────────────
+    # Set TUNNEL_ENABLED=true in .env to expose the local API via ngrok.
+    # Leave false in production — the tunnel will never start.
+    TUNNEL_ENABLED: bool = False
+    NGROK_AUTHTOKEN: str = ""          # from https://dashboard.ngrok.com/get-started/your-authtoken
+    NGROK_DOMAIN: str = ""             # static domain from dashboard.ngrok.com/domains (free tier: 1 domain)
+                                       # e.g. succulently-vegetational-jayson.ngrok-free.dev
+                                       # leave empty to get a random URL on each restart
+    NGROK_PORT: int = 8080             # must match the port uvicorn is listening on inside Docker
+
     # ── LLM mock (set to True to skip Gemini API calls during dev/demo) ────
     USE_MOCK_LLM: bool = False
 
@@ -87,7 +102,7 @@ class Settings(BaseSettings):
     RAG_TOP_K: int = 5                     # # of chunks sent to the LLM
     RAG_FETCH_K: int = 10                  # # of candidates fetched from ChromaDB (pre-rerank)
     USE_RERANKER: bool = True              # cross-encoder reranking of ChromaDB candidates
-    EMBEDDING_MODEL: str = "models/embedding-001"   # Gemini embedding
+    EMBEDDING_MODEL: str = "models/gemini-embedding-001"  # Gemini embedding
 
     # ── Data paths ────────────────────────────────────
     MATERIAS_DATA_DIR: str = "/app/data/materias"

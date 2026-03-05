@@ -1,7 +1,7 @@
 # BotAcademia Engine ??  v0.2.0
 
-**Motor de Tutoría IA basado en RAG** para la plataforma UTEL.  
-Procesa consultas académicas desde WhatsApp/BOT LUA usando Gemini 2.5 Flash Lite + ChromaDB + Redis + Kafka.
+**Motor de Tutorï¿½a IA basado en RAG** para la plataforma UTEL.  
+Procesa consultas acadï¿½micas desde WhatsApp/BOT LUA usando Gemini 2.5 Flash Lite + ChromaDB + Redis + Kafka.
 
 ---
 
@@ -9,20 +9,20 @@ Procesa consultas académicas desde WhatsApp/BOT LUA usando Gemini 2.5 Flash Lite
 
 ```
 BOT LUA  --POST /api/v1/query--?  FastAPI (Orquestador)
-                                        ¦
+                                        ï¿½
                           +-------------+----------------------+
                           ?             ?                        ?
                     Gemini LLM     ChromaDB               PostgreSQL
                   (Pre-process   (Vector Search            (QueryLog +
                    + Response)    materia + FAQ)         ConversationSession)
-                          ¦
-                   +------¦  SIEMPRE ACTIVO
-                   +-- Redis   (Historial de sesión por interaction_id, TTL 1h)
-                          ¦
-                   +------¦  PRODUCCIÓN (USE_KAFKA=true)
-                   ¦  Kafka Topics:
-                   ¦    botacademia.incoming_messages  --? Worker 1 (Preprocessor)
-                   ¦    botacademia.processed_queries  --? Worker 2 (RAG + LLM)
+                          ï¿½
+                   +------ï¿½  SIEMPRE ACTIVO
+                   +-- Redis   (Historial de sesiï¿½n por interaction_id, TTL 1h)
+                          ï¿½
+                   +------ï¿½  PRODUCCIï¿½N (USE_KAFKA=true)
+                   ï¿½  Kafka Topics:
+                   ï¿½    botacademia.incoming_messages  --? Worker 1 (Preprocessor)
+                   ï¿½    botacademia.processed_queries  --? Worker 2 (RAG + LLM)
 ```
 
 ### Pipeline de cada consulta
@@ -31,19 +31,19 @@ BOT LUA  --POST /api/v1/query--?  FastAPI (Orquestador)
 1. raw_message --?  Pre-procesador IA (Gemini)
                      ? intent: academico | saludo | queja | fuera_de_tema | despedida
                      ? sentiment: estresado | molesto | neutral | positivo
-                     ? clean_query: pregunta optimizada para búsqueda semántica
+                     ? clean_query: pregunta optimizada para bï¿½squeda semï¿½ntica
 
-2. Redis         --? Cargar historial de sesión (últimos SESSION_MAX_TURNS turnos)
+2. Redis         --? Cargar historial de sesiï¿½n (ï¿½ltimos SESSION_MAX_TURNS turnos)
 
 3. [parallel]
-   clean_query  --? ChromaDB materia (top 10 candidatos académicos)
+   clean_query  --? ChromaDB materia (top 10 candidatos acadï¿½micos)
    clean_query  --? ChromaDB utel_faq (top 10 candidatos FAQ)
                      ? merge ? 20 candidatos ? FlashRank reranker ? top 5
 
-4. top-5 chunks + historial + query --? Gemini (Generación RAG)
-                                          ? Respuesta empática, basada en contexto
+4. top-5 chunks + historial + query --? Gemini (Generaciï¿½n RAG)
+                                          ? Respuesta empï¿½tica, basada en contexto
 
-5. response  --? Redis (guardar turno en sesión)
+5. response  --? Redis (guardar turno en sesiï¿½n)
              --? PostgreSQL (QueryLog + ConversationSession)
              --? BOT LUA
 
@@ -53,56 +53,56 @@ BOT LUA  --POST /api/v1/query--?  FastAPI (Orquestador)
 
 ---
 
-## Base de Conocimiento — Estrategia de Vectorización (v0.2)
+## Base de Conocimiento ï¿½ Estrategia de Vectorizaciï¿½n (v0.2)
 
 ### Problema resuelto
-Las 418 preguntas y respuestas del FAQ de UTEL estaban duplicadas en cada materia (×5),
-los chunks de tamaño fijo partían respuestas a mitad de un paso, y el embedding de texto completo
-(Q+A) diluía la precisión de recuperación.
+Las 418 preguntas y respuestas del FAQ de UTEL estaban duplicadas en cada materia (ï¿½5),
+los chunks de tamaï¿½o fijo partï¿½an respuestas a mitad de un paso, y el embedding de texto completo
+(Q+A) diluï¿½a la precisiï¿½n de recuperaciï¿½n.
 
-### Solución implementada
+### Soluciï¿½n implementada
 
 | Aspecto | Antes (v0.1) | Ahora (v0.2) |
 |---|---|---|
-| FAQ storage | Duplicado en cada materia × 5 = 2090 chunks | Colección única `utel_faq` = 418 chunks |
-| Chunking | Fijo 1000 chars (partía respuestas a mitad) | Atómico: 1 par Q+A = 1 chunk |
-| Embedding | Texto completo Q+A (dilución semántica) | Solo texto `Q:` (indexado) + `full_qa` en metadata |
-| Búsqueda | Solo colección de materia | `semantic_search_combined()` — materia + FAQ en paralelo |
-| Reranker query | `clean_query` expandida con nombre de materia | `message` original del usuario (sin sesgo léxico) |
+| FAQ storage | Duplicado en cada materia ï¿½ 5 = 2090 chunks | Colecciï¿½n ï¿½nica `utel_faq` = 418 chunks |
+| Chunking | Fijo 1000 chars (partï¿½a respuestas a mitad) | Atï¿½mico: 1 par Q+A = 1 chunk |
+| Embedding | Texto completo Q+A (diluciï¿½n semï¿½ntica) | Solo texto `Q:` (indexado) + `full_qa` en metadata |
+| Bï¿½squeda | Solo colecciï¿½n de materia | `semantic_search_combined()` ï¿½ materia + FAQ en paralelo |
+| Reranker query | `clean_query` expandida con nombre de materia | `message` original del usuario (sin sesgo lï¿½xico) |
 
 ### Colecciones ChromaDB
 
 ```
 materia_utel_faq:                               418 Q&A chunks   ? FAQ compartido
-materia_258_criminologia_b:                     952 chunks académicos
-materia_156_sociologia_rural_c:               1 222 chunks académicos
-materia_58_estadistica_y_probabilidad:        2 231 chunks académicos
-materia_152_introduccion_admin_publica_c:     3 288 chunks académicos
-materia_155_principios_perspectivas_admin_c:  3 307 chunks académicos
+materia_258_criminologia_b:                     952 chunks acadï¿½micos
+materia_156_sociologia_rural_c:               1 222 chunks acadï¿½micos
+materia_58_estadistica_y_probabilidad:        2 231 chunks acadï¿½micos
+materia_152_introduccion_admin_publica_c:     3 288 chunks acadï¿½micos
+materia_155_principios_perspectivas_admin_c:  3 307 chunks acadï¿½micos
 ```
 
 ---
 
-## Gestión de Sesiones
+## Gestiï¿½n de Sesiones
 
-Cada `interaction_id` representa una conversación.  
-El historial se mantiene en Redis durante la conversación y se elimina al finalizar.
+Cada `interaction_id` representa una conversaciï¿½n.  
+El historial se mantiene en Redis durante la conversaciï¿½n y se elimina al finalizar.
 
-### Estados de sesión
+### Estados de sesiï¿½n
 
-| Estado | Cómo se alcanza | Efecto |
+| Estado | Cï¿½mo se alcanza | Efecto |
 |---|---|---|
 | `active` | Cualquier query normal | Pipeline completo, historial actualizado en Redis |
 | `finalizado` | LLM detecta intent `despedida` | Redis limpiado, `session_status: "finalizado"` en respuesta |
-| `closed` | Sistema externo envía `status: "closed"` | Redis limpiado sin llamar al pipeline |
+| `closed` | Sistema externo envï¿½a `status: "closed"` | Redis limpiado sin llamar al pipeline |
 
 ### Tabla `conversation_sessions` (PostgreSQL)
 
 ```
 interaction_id  materia_id   turn_count  status      started_at   closed_at
 --------------  -----------  ----------  ----------  -----------  ----------
-lua_abc123      258_Crim…    4           active      2026-03-04   null
-lua_xyz456      58_Esta…     2           finalizado  2026-03-04   2026-03-04
+lua_abc123      258_Crimï¿½    4           active      2026-03-04   null
+lua_xyz456      58_Estaï¿½     2           finalizado  2026-03-04   2026-03-04
 ```
 
 ---
@@ -112,39 +112,39 @@ lua_xyz456      58_Esta…     2           finalizado  2026-03-04   2026-03-04
 ```
 botAcademIA/
 +-- app/
-¦   +-- main.py
-¦   +-- api/v1/routes/
-¦   ¦   +-- messages.py          # POST /query (con gestión de sesión completa)
-¦   ¦   +-- ingest.py            # POST /ingest, GET /ingest/list
-¦   +-- core/
-¦   ¦   +-- config.py            # Settings (USE_REDIS=true, SESSION_MAX_TURNS=10)
-¦   ¦   +-- database.py          # Async PostgreSQL + migraciones idempotentes
-¦   ¦   +-- logging.py
-¦   +-- models/
-¦   ¦   +-- schemas.py           # QueryRequest (status) + QueryResponse (session_status)
-¦   ¦   +-- db_models.py         # QueryLog + ConversationSession + MateriaIndex
-¦   +-- services/
-¦   ¦   +-- pipeline.py          # Orquestador: sesión Redis + RAG + farewell detection
-¦   ¦   +-- llm_service.py       # Gemini: intent despedida + historial en prompt
-¦   ¦   +-- vector_store.py      # ChromaDB + semantic_search_combined()
-¦   ¦   +-- ingest_service.py    # Chunking Q&A-aware + FAQ extractor
-¦   ¦   +-- reranker.py          # FlashRank ms-marco-TinyBERT (~18ms)
-¦   ¦   +-- redis_cache.py       # get/update/invalidate_session
-¦   +-- workers/
-¦       +-- kafka_producer.py
-¦       +-- kafka_consumer.py    # Worker2: historial Redis + session update
+ï¿½   +-- main.py
+ï¿½   +-- api/v1/routes/
+ï¿½   ï¿½   +-- messages.py          # POST /query (con gestiï¿½n de sesiï¿½n completa)
+ï¿½   ï¿½   +-- ingest.py            # POST /ingest, GET /ingest/list
+ï¿½   +-- core/
+ï¿½   ï¿½   +-- config.py            # Settings (USE_REDIS=true, SESSION_MAX_TURNS=10)
+ï¿½   ï¿½   +-- database.py          # Async PostgreSQL + migraciones idempotentes
+ï¿½   ï¿½   +-- logging.py
+ï¿½   +-- models/
+ï¿½   ï¿½   +-- schemas.py           # QueryRequest (status) + QueryResponse (session_status)
+ï¿½   ï¿½   +-- db_models.py         # QueryLog + ConversationSession + MateriaIndex
+ï¿½   +-- services/
+ï¿½   ï¿½   +-- pipeline.py          # Orquestador: sesiï¿½n Redis + RAG + farewell detection
+ï¿½   ï¿½   +-- llm_service.py       # Gemini: intent despedida + historial en prompt
+ï¿½   ï¿½   +-- vector_store.py      # ChromaDB + semantic_search_combined()
+ï¿½   ï¿½   +-- ingest_service.py    # Chunking Q&A-aware + FAQ extractor
+ï¿½   ï¿½   +-- reranker.py          # FlashRank ms-marco-TinyBERT (~18ms)
+ï¿½   ï¿½   +-- redis_cache.py       # get/update/invalidate_session
+ï¿½   +-- workers/
+ï¿½       +-- kafka_producer.py
+ï¿½       +-- kafka_consumer.py    # Worker2: historial Redis + session update
 +-- data/materias/               # 5 materias POC
 +-- scripts/
-¦   +-- reingest_smart.py        # Ejecutar tras cambios en la KB
+ï¿½   +-- reingest_smart.py        # Ejecutar tras cambios en la KB
 +-- docker-compose.yml           # FastAPI + ChromaDB + PostgreSQL + Redis (siempre)
-¦                                # + Kafka/Zookeeper/KafkaUI (perfil production)
+ï¿½                                # + Kafka/Zookeeper/KafkaUI (perfil production)
 +-- Dockerfile
 +-- requirements.txt
 ```
 
 ---
 
-## Setup Rápido
+## Setup Rï¿½pido
 
 ### 1. Configurar variables de entorno
 
@@ -158,7 +158,7 @@ cp .env.example .env
 ```bash
 docker compose up -d
 
-# Verificar que los 4 servicios están healthy
+# Verificar que los 4 servicios estï¿½n healthy
 docker compose ps
 ```
 
@@ -169,7 +169,7 @@ docker cp scripts/reingest_smart.py botacademia_api:/app/reingest_smart.py
 docker exec botacademia_api python /app/reingest_smart.py
 ```
 
-### 4. Con perfil de producción (Kafka + alto volumen)
+### 4. Con perfil de producciï¿½n (Kafka + alto volumen)
 
 ```bash
 docker compose --profile production up -d
@@ -182,15 +182,15 @@ USE_KAFKA=true
 
 ## API Reference
 
-| Método | Endpoint | Descripción |
+| Mï¿½todo | Endpoint | Descripciï¿½n |
 |--------|----------|-------------|
-| `POST` | `/api/v1/query` | Consulta académica (con gestión de sesión) |
+| `POST` | `/api/v1/query` | Consulta acadï¿½mica (con gestiï¿½n de sesiï¿½n) |
 | `GET`  | `/api/v1/health` | Estado de todos los servicios |
 | `POST` | `/api/v1/ingest` | Vectorizar una materia |
 | `GET`  | `/api/v1/ingest/list` | Listar materias disponibles |
 | `GET`  | `/docs` | Swagger UI |
 
-### Payload — query normal (`status: "active"`)
+### Payload ï¿½ query normal (`status: "active"`)
 
 ```json
 {
@@ -201,13 +201,13 @@ USE_KAFKA=true
 }
 ```
 
-### Respuesta — conversación activa
+### Respuesta ï¿½ conversaciï¿½n activa
 
 ```json
 {
   "interaction_id": "lua_conv_abc123",
   "materia_id": "258_Criminologia_B",
-  "response": "¡Claro! En criminología...",
+  "response": "ï¿½Claro! En criminologï¿½a...",
   "intent": "academico",
   "sentiment": "neutral",
   "processing_time_ms": 2340.5,
@@ -216,13 +216,13 @@ USE_KAFKA=true
 }
 ```
 
-### Respuesta — sesión finalizada
+### Respuesta ï¿½ sesiï¿½n finalizada
 
 ```json
 {
   "interaction_id": "lua_conv_abc123",
   "materia_id": "258_Criminologia_B",
-  "response": "¡Fue un placer acompañarte! ?? ¡Mucho éxito en tus estudios! ??",
+  "response": "ï¿½Fue un placer acompaï¿½arte! ?? ï¿½Mucho ï¿½xito en tus estudios! ??",
   "intent": "despedida",
   "sentiment": "neutral",
   "processing_time_ms": 580.0,
@@ -231,7 +231,7 @@ USE_KAFKA=true
 }
 ```
 
-### Payload — cierre desde sistema externo (`status: "closed"`)
+### Payload ï¿½ cierre desde sistema externo (`status: "closed"`)
 
 ```json
 {
@@ -242,12 +242,12 @@ USE_KAFKA=true
 }
 ```
 
-> El sistema externo detecta `session_status: "finalizado"` para saber que la conversación
-> terminó (ya sea por farewell del estudiante o por cierre explícito del sistema externo).
+> El sistema externo detecta `session_status: "finalizado"` para saber que la conversaciï¿½n
+> terminï¿½ (ya sea por farewell del estudiante o por cierre explï¿½cito del sistema externo).
 
 ---
 
-## Ciclo Completo de Conversación — Ejemplo
+## Ciclo Completo de Conversaciï¿½n ï¿½ Ejemplo
 
 ```bash
 # Turno 1
@@ -258,7 +258,7 @@ curl -X POST http://localhost:8080/api/v1/query \
        "status":"active"}'
 # ? session_status: "active"
 
-# Turno 2 — el LLM tiene contexto del turno anterior
+# Turno 2 ï¿½ el LLM tiene contexto del turno anterior
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{"interaction_id":"sess_001","materia_id":"58_Estadistica_y_probabilidad",
@@ -266,7 +266,7 @@ curl -X POST http://localhost:8080/api/v1/query \
        "status":"active"}'
 # ? session_status: "active"
 
-# Turno 3 — despedida natural ? LLM detecta intent=despedida
+# Turno 3 ï¿½ despedida natural ? LLM detecta intent=despedida
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{"interaction_id":"sess_001","materia_id":"58_Estadistica_y_probabilidad",
@@ -274,7 +274,7 @@ curl -X POST http://localhost:8080/api/v1/query \
        "status":"active"}'
 # ? session_status: "finalizado"   (Redis limpiado, session.status=finalizado en PG)
 
-# Alternativa — sistema externo cierra sin despedida
+# Alternativa ï¿½ sistema externo cierra sin despedida
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{"interaction_id":"sess_001","materia_id":"58_Estadistica_y_probabilidad",
@@ -284,23 +284,23 @@ curl -X POST http://localhost:8080/api/v1/query \
 
 ---
 
-## Stack Tecnológico
+## Stack Tecnolï¿½gico
 
-| Componente | Tecnología | Notas |
+| Componente | Tecnologï¿½a | Notas |
 |------------|-----------|-------|
 | API | FastAPI 0.115 | async, hot-reload en dev |
 | LLM | Gemini 2.5 Flash Lite | sin thinking tokens, ~2s respuesta |
 | Reranker | FlashRank TinyBERT-L-2 | ~18ms, 4MB ONNX, query=original |
 | Base vectorial | ChromaDB 0.5.23 | 6 colecciones (5 materias + FAQ global) |
 | Base relacional | PostgreSQL 16 | QueryLog + ConversationSession |
-| Caché de sesión | Redis 7 | TTL 1h, siempre activo desde v0.2 |
-| Mensajería | Apache Kafka 7.6 (Confluent) | perfil `production` |
+| Cachï¿½ de sesiï¿½n | Redis 7 | TTL 1h, siempre activo desde v0.2 |
+| Mensajerï¿½a | Apache Kafka 7.6 (Confluent) | perfil `production` |
 | Contenedores | Docker + Docker Compose | |
 | Lenguaje | Python 3.11+ | |
 
 ---
 
-## Comandos de Gestión
+## Comandos de Gestiï¿½n
 
 ```bash
 # Iniciar stack base (FastAPI + ChromaDB + PostgreSQL + Redis)
@@ -312,19 +312,23 @@ docker compose --profile production up -d
 # Ver logs en tiempo real
 docker compose logs -f botacademia_api
 
-# Forzar recreación (necesario tras cambios en .env)
+# Forzar recreaciï¿½n (necesario tras cambios en .env)
 docker compose up -d --force-recreate botacademia_api
 
+docker compose logs -f botacademia_api 2>&1 | Select-String "WARNING|RAG EMPTY|RAG NO CHUNKS"
+
 # Apagar
-docker compose down          # sin borrar volúmenes
-docker compose down -v       # borrar volúmenes (ChromaDB y PG reinician desde cero)
+docker compose down          # sin borrar volï¿½menes
+docker compose down -v       # borrar volï¿½menes (ChromaDB y PG reinician desde cero)
 ```
 
+# limpiear cahce
+docker exec botacademia_redis redis-cli KEYS "semcache:*" | Measure-Object -Line
 ---
 
 ## 12 Pruebas de Referencia
 
-### 1 — Conversación multi-turno
+### 1 ï¿½ Conversaciï¿½n multi-turno
 
 ```bash
 # Turno 1
@@ -337,13 +341,13 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
   -d '{"interaction_id":"conv_001","materia_id":"258_Criminologia_B",
        "message":"y cuales son sus ramas principales?","status":"active"}'
 
-# Turno 3 — despedida ? session_status: "finalizado"
+# Turno 3 ï¿½ despedida ? session_status: "finalizado"
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
   -d '{"interaction_id":"conv_001","materia_id":"258_Criminologia_B",
        "message":"gracias ya entendi todo","status":"active"}'
 ```
 
-### 2 — Cierre desde sistema externo
+### 2 ï¿½ Cierre desde sistema externo
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -351,7 +355,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"","status":"closed"}'
 ```
 
-### 3 — FAQ: inscribirse a cursos opcionales
+### 3 ï¿½ FAQ: inscribirse a cursos opcionales
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -359,7 +363,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"como puedo inscribirme a los cursos opcionales?","status":"active"}'
 ```
 
-### 4 — FAQ: mensajería al profesor
+### 4 ï¿½ FAQ: mensajerï¿½a al profesor
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -367,7 +371,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"como puedo dejarle un mensaje a mi profesor?","status":"active"}'
 ```
 
-### 5 — Contenido académico: criminología
+### 5 ï¿½ Contenido acadï¿½mico: criminologï¿½a
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -375,7 +379,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"que es la criminologia y para que sirve?","status":"active"}'
 ```
 
-### 6 — Estudiante estresado
+### 6 ï¿½ Estudiante estresado
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -383,7 +387,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"no entiendo NADA y el examen es manana, ayuda!!","status":"active"}'
 ```
 
-### 7 — Saludo puro (sin RAG)
+### 7 ï¿½ Saludo puro (sin RAG)
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -391,7 +395,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"hola buenas tardes como estas","status":"active"}'
 ```
 
-### 8 — Fuera de tema
+### 8 ï¿½ Fuera de tema
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -399,7 +403,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"cuanto cuesta un iphone?","status":"active"}'
 ```
 
-### 9 — Estadística: dado
+### 9 ï¿½ Estadï¿½stica: dado
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -407,7 +411,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"cual es la probabilidad de que salga 1 cuando lanzo un dado?","status":"active"}'
 ```
 
-### 10 — Administración Pública
+### 10 ï¿½ Administraciï¿½n Pï¿½blica
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/json" \
@@ -415,7 +419,7 @@ curl -X POST http://localhost:8080/api/v1/query -H "Content-Type: application/js
        "message":"diferencia entre administracion publica y privada","status":"active"}'
 ```
 
-### 11 — Verificar sesiones en PostgreSQL
+### 11 ï¿½ Verificar sesiones en PostgreSQL
 
 ```bash
 docker exec botacademia_postgres psql -U botacademia -c \
@@ -423,7 +427,7 @@ docker exec botacademia_postgres psql -U botacademia -c \
    FROM conversation_sessions ORDER BY started_at DESC LIMIT 10;"
 ```
 
-### 12 — Estado del sistema
+### 12 ï¿½ Estado del sistema
 
 ```bash
 curl http://localhost:8080/api/v1/health
@@ -437,24 +441,189 @@ curl http://localhost:8080/api/v1/health
 # Tiempo real
 docker compose exec botacademia_api tail -f /app/logs/app.log
 
-# Filtrar por sesión
+# Filtrar por sesiï¿½n
 docker compose exec botacademia_api grep "conv_001" /app/logs/app.log
 
 # Desde host (Windows)
 Get-Content logs\app.log -Tail 50
 ```
 
-Ejemplo de traza completa de una sesión:
+Ejemplo de traza completa de una sesiï¿½n:
 
 ```
 Pipeline start       | interaction=conv_001 materia=258_Criminologia_B
 Session history loaded | interaction=conv_001 turns=2
 Pre-process done     | intent=academico sentiment=neutral 490ms
 QUERY ORIGINAL       | cuales son sus ramas principales?
-QUERY MEJORADA       | ramas de la criminologia
 RAG search done      | materia=258_Criminologia_B chunks=20 260ms
-Reranker done        | 20?5 chunks 19ms | top score=0.997
+Reranker done        | 20â†’5 chunks 19ms | top score=0.997
 Pipeline complete    | total=2150ms (parallel=490 rerank=19 llm=1400)
+```
+
+---
+
+## Diagrama de Flujo Completo â€” BotAcademia Engine v0.3
+
+```mermaid
+flowchart TD
+    A([BOT LUA\nPOST /api/v1/query\ninteraction_id Â· materia_id Â· message Â· status]) --> B
+
+    B{status == 'closed'?}
+    B -- SÃ­ --> B1[Invalidar sesiÃ³n Redis\nSession status â†’ finalizado\nsin pipeline]
+    B1 --> Z([Respuesta al BOT LUA\nsession_status: finalizado])
+    B -- No --> C
+
+    C[/Cargar historial\nde sesiÃ³n Redis/]
+    C --> C1[(Redis\nsession:interaction_id\nTTL 15 min idle)]
+    C1 --> C
+
+    C --> D
+
+    subgraph CACHE ["ğŸ”µ SEMANTIC CACHE CHECK  (costo $0 â€” puro Python + Redis)"]
+        D{SEMANTIC_CACHE_ENABLED?}
+        D -- No â†’ saltar --> G
+        D -- SÃ­ --> E
+
+        E{Â¿Pregunta context-dependent?\n_is_context_dependent\nRegex + heurÃ­stica longitud}
+        E -- SÃ­: eso/lo anterior/y si/\nfrase corta + conector --> F_SKIP[SKIP cachÃ©\nâ†’ ir al pipeline completo]
+        F_SKIP --> G
+
+        E -- No: pregunta autosuficiente --> F1
+        F1[Normalizar mensaje\nminus Â· sin puntuaciÃ³n Â· sin espacios extra]
+        F1 --> F2[Embed consulta\nGemini gemini-embedding-001\n~10ms]
+        F2 --> F3[Scan Redis\nsemcache:materia_id:*\ncosine similarity vs embeddings guardados]
+
+        F3 --> F4{Similitud â‰¥ 0.92?}
+        F4 -- HIT\nsimilitud 0.92â€“1.00 --> F5[Devolver respuesta cacheada\n0 tokens Â· ~300ms\ncache_hit: true]
+        F5 --> U
+        F4 -- MISS --> G
+    end
+
+    subgraph PARALLEL ["âš¡ ETAPAS 1+2 EN PARALELO  (asyncio.gather)"]
+        G --> G_SPLIT[ ]
+        G_SPLIT --> H
+        G_SPLIT --> I
+
+        subgraph PREPROCESS ["Etapa 1 â€” Preprocesador IA  (~400ms)"]
+            H[Gemini 2.5 Flash Lite\nPreprocessor\n~280 tokens]
+            H --> H1{JSON:\nintent Â· sentiment Â· confidence}
+        end
+
+        subgraph RAG ["Etapa 2 â€” BÃºsqueda Vectorial  (~400ms)"]
+            I[ChromaDB query\nembedding del mensaje original]
+            I --> I1[(ChromaDB\nmateria_collection\ntop-10 candidatos)]
+            I --> I2[(ChromaDB\nutel_faq\ntop-10 candidatos)]
+            I1 --> I3[Merge â†’ 20 candidatos]
+            I2 --> I3
+        end
+
+        H1 --> JOIN[ ]
+        I3 --> JOIN
+    end
+
+    JOIN --> J
+
+    subgraph ROUTING ["ğŸ”€ ROUTING POR INTENT"]
+        J{intent?}
+        J -- fuera_de_tema --> R1[Respuesta genÃ©rica\n0 tokens RAG/LLM]
+        J -- saludo --> R2[Respuesta de bienvenida\n0 tokens RAG/LLM]
+        J -- despedida --> R3[Mensaje de cierre\nInvalidar Redis\nsession_status: finalizado]
+        J -- academico / queja --> K
+    end
+
+    R1 --> Z
+    R2 --> Z
+    R3 --> Z
+
+    subgraph RERANK ["ğŸ… RERANKER  (~20ms Â· local ONNX Â· sin tokens)"]
+        K{Â¿20 chunks\nencontrados?}
+        K -- chunks = 0 --> K0[Short-circuit\nâš ï¸ No encontrÃ© info...\n0 tokens LLM]
+        K0 --> U
+        K -- chunks > 0 --> K1[FlashRank\nms-marco-TinyBERT-L-2\n4MB ONNX]
+        K1 --> K2[Top-5 chunks\nreordenados por relevancia]
+    end
+
+    subgraph LLM ["ğŸ¤– ETAPA 3 â€” GENERACIÃ“N RAG  (~700ms)"]
+        K2 --> L[Construir prompt:\nsystem_prompt\n+ tone_hint por sentiment\n+ historial Redis N Ãºltimos turnos\n+ top-5 chunks materia\n+ pregunta estudiante]
+        L --> M[Gemini 2.5 Flash Lite\nRespuesta empÃ¡tica\n~1600â€“2000 tokens in\n~100 tokens out]
+        M --> N[Respuesta final]
+    end
+
+    subgraph PERSIST ["ğŸ’¾ PERSISTENCIA  (no bloquea respuesta HTTP)"]
+        N --> O[Actualizar Redis\nagregar turno al historial\nmax SESSION_MAX_TURNS]
+        O --> P{SEMANTIC_CACHE_ENABLED\n+ Â¿pregunta autosuficiente?}
+        P -- SÃ­ --> P1[asyncio.create_task\ncache_response\nEmbed + guardar en Redis\nTTL 24h Â· no bloquea]
+        P -- No --> Q
+        P1 --> Q
+        Q[PostgreSQL\nquery_logs: tokens Â· ms Â· chunks Â· intent\nconversation_sessions: turn_count Â· total_tokens]
+    end
+
+    Q --> U
+    U([Respuesta al BOT LUA\nresponse Â· intent Â· sentiment\nprocessing_time_ms Â· cache_hit\nsession_status Â· tokens_in/out])
+
+    style CACHE fill:#e8f4fd,stroke:#2196F3
+    style PARALLEL fill:#f3e5f5,stroke:#9C27B0
+    style ROUTING fill:#fff8e1,stroke:#FF9800
+    style RERANK fill:#e8f5e9,stroke:#4CAF50
+    style LLM fill:#fce4ec,stroke:#E91E63
+    style PERSIST fill:#f5f5f5,stroke:#9E9E9E
+    style F5 fill:#c8e6c9,stroke:#388E3C
+    style K0 fill:#ffcdd2,stroke:#D32F2F
+    style R1 fill:#fff9c4,stroke:#F9A825
+    style R2 fill:#fff9c4,stroke:#F9A825
+    style R3 fill:#fff9c4,stroke:#F9A825
+```
+
+---
+
+### DescripciÃ³n textual del flujo (para generaciÃ³n de imagen)
+
+**Sistema:** BotAcademia Engine â€” Motor de TutorÃ­a IA basado en RAG para UTEL.
+
+**Componentes principales** (de izquierda a derecha, de arriba a abajo):
+- **BOT LUA** â†’ API FastAPI â†’ Pipeline orquestador â†’ respuesta de vuelta al BOT LUA
+- **Redis** (izquierda): historial de sesiÃ³n multi-turno + cachÃ© semÃ¡ntico de respuestas
+- **ChromaDB** (centro): base vectorial con 6 colecciones (5 materias + FAQ global)
+- **Gemini API** (centro-derecha): 2 llamadas â€” preprocesador (~280 tokens) y generaciÃ³n RAG (~1600 tokens)
+- **FlashRank** (local, ONNX): reranker sin llamadas externas, ~20ms
+- **PostgreSQL** (derecha): log permanente de cada consulta y mÃ©tricas de sesiÃ³n
+
+**Flujo resumido en 8 pasos:**
+
+```
+[1] BOT LUA envÃ­a mensaje
+        â†“
+[2] CIERRE RÃPIDO: status=closed â†’ limpiar Redis â†’ responder sin pipeline
+        â†“
+[3] CACHÃ‰ SEMÃNTICO:
+    Â¿Pregunta autosuficiente? (regex + heurÃ­stica de longitud)
+      â†’ SÃ â†’ Buscar en Redis por similitud coseno (embedding Gemini)
+              â‰¥ 0.92 similitud â†’ HIT â†’ responder en 300ms, 0 tokens
+              < 0.92           â†’ MISS â†’ continuar al pipeline
+      â†’ NO (referencia al contexto) â†’ saltar cachÃ©
+        â†“
+[4] PARALELO (asyncio.gather):
+    â”œâ”€â”€ Preprocesador Gemini â†’ intent + sentiment + confidence
+    â””â”€â”€ ChromaDB â†’ top-10 materia + top-10 FAQ â†’ merge 20 candidatos
+        â†“
+[5] ROUTING por intent:
+    fuera_de_tema / saludo / despedida â†’ respuesta hardcoded, fin
+    academico / queja â†’ continuar
+        â†“
+[6] RERANKER FlashRank (local):
+    20 candidatos â†’ cross-encoder TinyBERT â†’ top-5 mÃ¡s relevantes
+    0 chunks â†’ short-circuit âš ï¸ sin llamar a Gemini
+        â†“
+[7] GENERACIÃ“N RAG (Gemini):
+    prompt = system + historial Redis + top-5 chunks + pregunta
+    â†’ respuesta empÃ¡tica contextualizada
+        â†“
+[8] PERSISTENCIA:
+    â”œâ”€â”€ Redis: guardar turno (mÃ¡x SESSION_MAX_TURNS turnos)
+    â”œâ”€â”€ Redis (async): guardar en cachÃ© semÃ¡ntico si pregunta autosuficiente
+    â””â”€â”€ PostgreSQL: query_log + conversation_session
+        â†“
+    Respuesta al BOT LUA
 ```
 
 ---
