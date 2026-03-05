@@ -73,6 +73,9 @@ class RetrievedChunk(BaseModel):
     source: str                    # e.g. "contenido.txt" or "contenido.json"
     materia_id: str
     distance: float | None = None
+    unidad: str | None = None      # e.g. "Unidad 2 Probabilidad"
+    unidad_num: int | None = None  # e.g. 2
+    semana: str | None = None      # e.g. "Semana 2"
 
 
 class RAGResult(BaseModel):

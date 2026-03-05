@@ -127,12 +127,20 @@ async def semantic_search(
         # FAQ chunks: document = Q: text (for embedding precision)
         # but full_qa metadata holds the complete Q+A for the LLM.
         content = meta.get("full_qa") or doc
-        chunks.append({
+        chunk: dict = {
             "content": content,
             "source": meta.get("source", "unknown"),
             "materia_id": materia_id,
             "distance": round(dist, 4),
-        })
+        }
+        # Pass unit metadata when present (set by unit-aware ingest)
+        if meta.get("unidad"):
+            chunk["unidad"] = meta["unidad"]
+        if meta.get("unidad_num") is not None:
+            chunk["unidad_num"] = meta["unidad_num"]
+        if meta.get("semana"):
+            chunk["semana"] = meta["semana"]
+        chunks.append(chunk)
 
     logger.debug("RAG search '%s' returned %d chunks", materia_id, len(chunks))
     return chunks

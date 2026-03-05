@@ -13,6 +13,7 @@ import re
 import google.generativeai as genai
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.services.ingest_service import get_materia_resources
 
 logger = get_logger(__name__)
 
@@ -172,6 +173,7 @@ FORMATO (obligatorio):
 - Si el contexto tiene N opciones o pasos, inclúyelos TODOS sin omitir ninguno.
 - Máx. 2 líneas por punto. Doble salto entre secciones.
 - Sin datos en contexto: ⚠️ No tengo ese dato, consúltalo con tu profesor.
+- ATRIBUCIÓN DE UNIDAD: las etiquetas [Unidad: ...] del contexto indican de qué unidad proviene la información. Menciona naturalmente en qué unidad el estudiante encontrará el tema (Ej: "puedes profundizar en la Unidad 1 - Estadística descriptiva"). Usa la unidad más relevante para la pregunta del estudiante, basándote en el contenido de la respuesta.
 - PROHIBIDO terminar con frases de cierre como "¿Te puedo ayudar con algo más?", "Espero haberte ayudado", "¡Aquí estoy para apoyarte!" o similares. Termina directamente después del último punto de contenido.
 """
 
@@ -193,9 +195,20 @@ async def generate_rag_response(  # noqa: PLR0913
     if not context_chunks:
         context_text = "No se encontró información relevante en el material de esta materia."
     else:
-        context_text = "\n---\n".join(
-            f"[Fuente: {c['source']}]\n{c['content']}" for c in context_chunks
-        )
+        # Build context with unit labels so the LLM knows the source unit per chunk
+        context_parts = []
+        for c in context_chunks:
+            unidad = c.get("unidad", "")
+            semana = c.get("semana", "")
+            source = c.get("source", "")
+            label_parts = [f"Fuente: {source}"]
+            if unidad:
+                label_parts.append(f"Unidad: {unidad}")
+            if semana:
+                label_parts.append(f"Semana: {semana}")
+            label = " | ".join(label_parts)
+            context_parts.append(f"[{label}]\n{c['content']}")
+        context_text = "\n---\n".join(context_parts)
 
     # Tone advisory based on sentiment
     tone_hint = {
@@ -276,6 +289,34 @@ Responde al estudiante:"""
             "RESPUESTA ← LLM | interaction=%s | response_chars=%d tokens_in=%d tokens_out=%d\n--- RESPONSE START ---\n%s\n--- RESPONSE END ---",
             interaction_id, len(result), tokens_in, tokens_out, result,
         )
+
+        # ── Post-process: attach resources matching the unit the LLM itself cited ─────────────────
+        # Parse "Unidad N" from LLM output — the model already decides the most relevant unit.
+        # Resources fetched here always match the attribution, regardless of retrieval bias.
+        unit_m = re.search(r"Unidad\s+(\d+)", result, re.IGNORECASE)
+        if unit_m and context_chunks:
+            cited_unit = int(unit_m.group(1))
+            res_by_unit = get_materia_resources(materia_id, [cited_unit])
+            all_res = res_by_unit.get(cited_unit, [])
+
+            # Prioritise PDFs (Lectura) over videos; cap total at 3
+            pdfs   = [r for r in all_res
+                      if "pdf" in r.get("titulo", "").lower()
+                      or r.get("tipo", "").lower() in ("lectura", "pdf")]
+            videos = [r for r in all_res if r not in pdfs]
+            selected = (pdfs[:2] + videos[:1])[:3]   # up to 2 PDFs + 1 video, max 3
+
+            resource_lines = [
+                f"- [{r.get('titulo') or 'Material'}]({r['url']})"
+                for r in selected if r.get("url")
+            ]
+            if resource_lines:
+                result = result.rstrip() + "\n\n📚 Materiales de apoyo:\n" + "\n".join(resource_lines)
+                logger.debug(
+                    "Resources appended | interaction=%s unit=%d resources=%d",
+                    interaction_id, cited_unit, len(resource_lines),
+                )
+
         return result, tokens_in, tokens_out
     except Exception as exc:
         logger.error("RAG response generation error: %s", exc)

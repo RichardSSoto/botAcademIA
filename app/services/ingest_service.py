@@ -54,6 +54,208 @@ def _chunk_id(materia_id: str, source: str, idx: int) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+# ── Unit-aware txt chunking ───────────────────────────────────────────────────
+
+UNIT_TITLE_MARKER = r"El titulo de esta unidad es:"
+
+
+def _extract_unit_chunks_from_txt(
+    academic_text: str,
+) -> list[tuple[str, dict]]:
+    """
+    Split the academic section by unit boundary markers and chunk each unit
+    independently so every chunk carries metadata['unidad'] and
+    metadata['unidad_num'].
+
+    Unit boundary pattern inside contenido.txt:
+        "El titulo de esta unidad es: Unidad N <name>. ..."
+    """
+    segments = re.split(UNIT_TITLE_MARKER, academic_text)
+
+    # Segments[0] is pre-unit header (course intro, evaluations, etc.)
+    # Tag it without a specific unit number.
+    results: list[tuple[str, dict]] = []
+
+    if segments[0].strip():
+        for i, chunk in enumerate(_chunk_text(segments[0])):
+            results.append((f"[Introduccion] {chunk}", {
+                "source": "contenido.txt",
+                "tipo": "academico",
+                "unidad": "Introduccion",
+                "unidad_num": 0,
+                "chunk_index": i,
+            }))
+
+    for segment in segments[1:]:
+        # First characters: "Unidad N <title>. El texto de introduccion ..."
+        name_match = re.match(r"\s*(Unidad\s+\d+[^.]*)", segment)
+        unit_name = name_match.group(1).strip() if name_match else "Sin unidad"
+        num_match = re.search(r"Unidad\s+(\d+)", unit_name)
+        unit_num = int(num_match.group(1)) if num_match else 0
+
+        base_idx = len(results)
+        for i, chunk in enumerate(_chunk_text(segment)):
+            results.append((f"[{unit_name}] {chunk}", {
+                "source": "contenido.txt",
+                "tipo": "academico",
+                "unidad": unit_name,
+                "unidad_num": unit_num,
+                "chunk_index": base_idx + i,
+            }))
+
+    return results
+
+
+# ── Structured contenido.json extractor ──────────────────────────────────────
+
+
+def _clean_resources(raw_list: list) -> list[dict]:
+    """Filter and normalise a list of resource dicts from contenido.json."""
+    cleaned = []
+    for r in raw_list or []:
+        url = (r.get("url") or "").strip()
+        if not url or url.startswith("//view.vzaar"):
+            # Skip empty URLs and raw vzaar embed paths (no useful link for students)
+            continue
+        tipo = (r.get("tipo") or "").strip()
+        titulo = (r.get("titulo") or "").strip()
+        cleaned.append({"titulo": titulo, "tipo": tipo, "url": url})
+    return cleaned
+
+
+def _extract_from_contenido_json(
+    path: Path,
+) -> tuple[list[tuple[str, dict]], dict[int, list[dict]]]:
+    """
+    Parse contenido.json and return:
+      - chunks: list[(text, metadata)] tagged with unidad / semana
+      - resources_by_unit: {unit_num: [{titulo, tipo, url}, ...]} for query-time lookup
+
+    Each text chunk carries:
+      metadata['source']      = 'contenido.json'
+      metadata['tipo']        = 'academico'
+      metadata['unidad']      = e.g. 'Unidad 2 Probabilidad'
+      metadata['unidad_num']  = 2
+      metadata['semana']      = e.g. 'Semana 2'
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not parse %s: %s", path, exc)
+        return [], {}
+
+    curso = data.get("curso", {})
+    units = curso.get("unidades", [])
+    chunks: list[tuple[str, dict]] = []
+    resources_by_unit: dict[int, list[dict]] = {}
+    global_idx = 0
+
+    for unit in units:
+        unit_title = (unit.get("titulo") or "").strip()
+        num_match = re.search(r"Unidad\s+(\d+)", unit_title)
+        unit_num = int(num_match.group(1)) if num_match else 0
+
+        unit_resources: list[dict] = []
+
+        # -- Unit-level text (intro, learning outcomes, competencies) ----------
+        unit_text_parts: list[str] = []
+        if unit.get("introduccion"):
+            unit_text_parts.append(f"Introduccion: {unit['introduccion']}")
+        if unit.get("resultados_de_aprendizaje"):
+            unit_text_parts.append(
+                f"Resultados de aprendizaje: {unit['resultados_de_aprendizaje']}"
+            )
+        if unit.get("competencias"):
+            unit_text_parts.append(f"Competencias: {unit['competencias']}")
+
+        unit_text = "\n".join(unit_text_parts).strip()
+        if unit_text:
+            for chunk in _chunk_text(unit_text):
+                chunks.append((f"[{unit_title}] {chunk}", {
+                    "source": "contenido.json",
+                    "tipo": "academico",
+                    "unidad": unit_title,
+                    "unidad_num": unit_num,
+                    "semana": "",
+                    "chunk_index": global_idx,
+                }))
+                global_idx += 1
+
+        # -- Per-week content --------------------------------------------------
+        for semana in unit.get("semanas", []):
+            semana_titulo = (semana.get("titulo") or "").strip()
+
+            # Class content text
+            clase = semana.get("clase") or {}
+            clase_text = (clase.get("contenido") or "").strip()
+            if clase_text:
+                for chunk in _chunk_text(clase_text):
+                    chunks.append((f"[{unit_title}] {chunk}", {
+                        "source": "contenido.json",
+                        "tipo": "academico",
+                        "unidad": unit_title,
+                        "unidad_num": unit_num,
+                        "semana": semana_titulo,
+                        "chunk_index": global_idx,
+                    }))
+                    global_idx += 1
+
+            # Resources from class (videos)
+            unit_resources.extend(_clean_resources(clase.get("recursos", [])))
+
+            # Resources from semana (PDFs, additional videos)
+            unit_resources.extend(_clean_resources(semana.get("recursos", [])))
+
+            # Resource text content (e.g. PDF extracts, video transcripts)
+            for recurso in semana.get("recursos", []):
+                contenido = (recurso.get("contenido") or "").strip()
+                if contenido and len(contenido) > 100:
+                    for chunk in _chunk_text(contenido):
+                        chunks.append((f"[{unit_title}] {chunk}", {
+                            "source": "contenido.json",
+                            "tipo": "academico",
+                            "unidad": unit_title,
+                            "unidad_num": unit_num,
+                            "semana": semana_titulo,
+                            "chunk_index": global_idx,
+                        }))
+                        global_idx += 1
+
+        # Deduplicate resources within the unit
+        seen_urls: set[str] = set()
+        deduped: list[dict] = []
+        for r in unit_resources:
+            if r["url"] not in seen_urls:
+                seen_urls.add(r["url"])
+                deduped.append(r)
+        resources_by_unit[unit_num] = deduped
+
+    return chunks, resources_by_unit
+
+
+# ── Resource lookup (called at query time by llm_service) ─────────────────────
+
+
+def get_materia_resources(
+    materia_id: str,
+    unit_nums: list[int] | None = None,
+) -> dict[int, list[dict]]:
+    """
+    Return support materials from contenido.json for the given materia.
+    If unit_nums is provided, filter to only those units.
+    Returns {unit_num: [{titulo, tipo, url}, ...]}.
+    Called at query time to enrich the LLM prompt with relevant URLs.
+    """
+    base_dir = Path(settings.MATERIAS_DATA_DIR)
+    path = base_dir / materia_id / "contenido.json"
+    if not path.exists():
+        return {}
+    _, resources_by_unit = _extract_from_contenido_json(path)
+    if unit_nums is not None:
+        return {k: v for k, v in resources_by_unit.items() if k in unit_nums}
+    return resources_by_unit
+
+
 def _split_qa_sections(text: str) -> tuple[str, str]:
     """
     Split contenido.txt into (academic_text, faq_text).
@@ -117,10 +319,9 @@ def _extract_qa_chunks(faq_text: str) -> list[tuple[str, dict]]:
 
 def _extract_from_txt(path: Path) -> list[tuple[str, dict]]:
     """
-    Read .txt file and return ONLY the academic section as fixed-size chunks.
-    The Q&A FAQ section is intentionally excluded here — it is ingested once
-    into the shared 'utel_faq' collection via ingest_faq().
-    Each chunk is tagged tipo='academico'.
+    Read .txt file and return ONLY the academic section as unit-aware chunks.
+    Each chunk is tagged tipo='academico' plus unidad / unidad_num metadata.
+    The Q&A FAQ section is excluded — handled separately via ingest_faq().
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -135,10 +336,13 @@ def _extract_from_txt(path: Path) -> list[tuple[str, dict]]:
         len([l for l in faq_text.splitlines() if l.startswith("Q:")]),
     )
 
-    results = []
-    for i, chunk in enumerate(_chunk_text(academic_text)):
-        meta = {"source": "contenido.txt", "tipo": "academico", "chunk_index": i}
-        results.append((chunk, meta))
+    results = _extract_unit_chunks_from_txt(academic_text)
+
+    # Log unit distribution for debugging
+    from collections import Counter
+    unit_counts = Counter(meta.get("unidad", "?") for _, meta in results)
+    logger.debug("%s | unit chunks: %s", path.name, dict(unit_counts))
+
     return results
 
 
@@ -163,7 +367,17 @@ def _flatten_json(obj, prefix: str = "") -> list[str]:
 
 
 def _extract_from_json(path: Path, source_label: str) -> list[tuple[str, dict]]:
-    """Read a .json file, flatten it, then chunk the text."""
+    """
+    Read a .json file and chunk its text.
+    For contenido.json, uses the structured extractor that preserves
+    unit/semana hierarchy and resource metadata.
+    For other JSON files (e.g. descripcion.json), falls back to flat extraction.
+    """
+    if path.name == "contenido.json":
+        chunks, _ = _extract_from_contenido_json(path)
+        return chunks
+
+    # Fallback: flat extraction for other JSON files
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
