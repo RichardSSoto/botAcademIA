@@ -85,10 +85,13 @@ TUTOR_IDENTITY_TEMPLATE = (
 PREPROCESSOR_SYSTEM = """Eres un asistente de análisis de consultas académicas.
 Tu tarea es analizar el mensaje de un estudiante y devolver ÚNICAMENTE un objeto JSON válido con los campos:
 - intent: clasificación del mensaje. Valores posibles:
-    "academico"       - pregunta sobre contenido de la materia
+    "academico"       - pregunta sobre contenido académico de la materia (teoría, ejercicios, conceptos)
+    "operativo"       - pregunta sobre plataforma, gestión académica o procedimientos de la universidad
+                        (ejemplos: cómo contactar al profesor, calificaciones, open class, exámenes, actividades,
+                        aula virtual, mensajes, entregas, trámites, horarios, bimestre, Explora UTEL, etc.)
     "saludo"          - greeting sin contenido académico
     "queja"           - queja o insatisfacción
-    "fuera_de_tema"   - tema que no tiene relación con la materia
+    "fuera_de_tema"   - tema completamente ajeno a la universidad o a la materia (deportes, cocina, política, etc.)
     "despedida"       - el estudiante indica claramente que ya no tiene más dudas o se despide
                         (ejemplos: "gracias, hasta luego", "ya entendí todo, bye", "chao", "eso era todo", "muchas gracias ya no tengo dudas")
 - sentiment: estado emocional. Valores posibles: "estresado", "molesto", "neutral", "positivo"
@@ -173,7 +176,7 @@ FORMATO (obligatorio):
 - Si el contexto tiene N opciones o pasos, inclúyelos TODOS sin omitir ninguno.
 - Máx. 2 líneas por punto. Doble salto entre secciones.
 - Sin datos en contexto: ⚠️ No tengo ese dato, consúltalo con tu profesor.
-- ATRIBUCIÓN DE UNIDAD: las etiquetas [Unidad: ...] del contexto indican de qué unidad proviene la información. Menciona naturalmente en qué unidad el estudiante encontrará el tema (Ej: "puedes profundizar en la Unidad 1 - Estadística descriptiva"). Usa la unidad más relevante para la pregunta del estudiante, basándote en el contenido de la respuesta.
+- ATRIBUCIÓN DE UNIDAD: solo para preguntas académicas (teoría, cálculos, conceptos). Las etiquetas [Unidad: ...] del contexto indican de qué unidad proviene la información. Meníona naturalmente en qué unidad encontrará el tema. Para preguntas operativas (plataforma, gestor, calificaciones, mensajes al profesor, etc.) NOT menciones ninguna unidad.
 - PROHIBIDO terminar con frases de cierre como "¿Te puedo ayudar con algo más?", "Espero haberte ayudado", "¡Aquí estoy para apoyarte!" o similares. Termina directamente después del último punto de contenido.
 """
 
@@ -291,10 +294,9 @@ Responde al estudiante:"""
         )
 
         # ── Post-process: attach resources matching the unit the LLM itself cited ─────────────────
-        # Parse "Unidad N" from LLM output — the model already decides the most relevant unit.
-        # Resources fetched here always match the attribution, regardless of retrieval bias.
+        # Skip for operativo intent: platform/admin questions have no relevant academic unit resources.
         unit_m = re.search(r"Unidad\s+(\d+)", result, re.IGNORECASE)
-        if unit_m and context_chunks:
+        if unit_m and context_chunks and intent != "operativo":
             cited_unit = int(unit_m.group(1))
             res_by_unit = get_materia_resources(materia_id, [cited_unit])
             all_res = res_by_unit.get(cited_unit, [])

@@ -235,7 +235,7 @@ async def run_pipeline(request: QueryRequest) -> QueryResponse:
             "_session_status": "closed"}
 
     # ── Short-circuit: no chunks for academic query → refuse gracefully, save LLM tokens ────
-    if not final_chunks and preprocess.intent in ("academico", "queja"):
+    if not final_chunks and preprocess.intent in ("academico", "operativo", "queja"):
         no_data_response = (
             "⚠️ No encontré información sobre ese tema en el material de tu materia. "
             "Te recomiendo consultarlo con tu profesor o revisar el material del curso."
